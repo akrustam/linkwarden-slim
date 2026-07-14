@@ -99,6 +99,14 @@ Our `Dockerfile` is a deliberate fork of the [upstream Dockerfile](https://githu
 
 On every `VERSION` bump: manually `diff` against upstream’s Dockerfile for that tag; update `node:` / `rust:` base pins in lockstep. No sed/patch in CI.
 
+After `yarn workspaces focus --production`, the Dockerfile runs a **safe prune** (keeps `playwright` / `playwright-core` for `PLAYWRIGHT_WS_URL`):
+
+- remove `@next/swc-*` (build-only)
+- remove unused Prisma WASM for mysql/sqlite/sqlserver (Postgres engines kept)
+- strip `*.md` / `*.map` / lucide UMD / phosphor SVG asset pack
+
+Most remaining weight is Next.js + prod `node_modules` (~0.5–0.9 GB unpacked). Desktop “Size” is uncompressed; Hub shows compressed download.
+
 ## Compose
 
 See [`docker-compose.example.yml`](./docker-compose.example.yml) for Postgres + MeiliSearch + slim Linkwarden.
@@ -118,7 +126,7 @@ docker build -f Dockerfile -t linkwarden-slim:local ./src
 2. Add secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
 3. Ensure `GITHUB_TOKEN` can write packages (`packages: write` is in the workflow).
 4. Run **Actions → build-publish → Run workflow** with `version=v2.15.1` (first publish).
-5. Confirm tags on GHCR and Docker Hub; check image size (should be far below the official ~1.5 GB with Chromium).
+5. Confirm tags on GHCR and Docker Hub; compare Hub compressed size vs Docker Desktop uncompressed size.
 
 ## Disclaimer
 

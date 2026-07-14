@@ -48,6 +48,28 @@ RUN yarn workspaces focus --production linkwarden @linkwarden/web @linkwarden/wo
  rm -rf apps/web/.next/cache && \
  yarn cache clean
 
+# Safe runtime prune (do NOT remove playwright / playwright-core — needed for PLAYWRIGHT_WS_URL).
+# Biggest win: @next/swc-* is build-only and unused by `next start`.
+RUN set -eux; \
+  find node_modules -type d -name 'swc-*' -path '*/@next/*' -prune -exec rm -rf {} +; \
+  find node_modules -type f \( \
+    -name 'query_engine_bg.mysql*' -o \
+    -name 'query_engine_bg.sqlite*' -o \
+    -name 'query_engine_bg.sqlserver*' \
+  \) -delete; \
+  find node_modules -type f \( \
+    -name '*.md' -o -name '*.markdown' -o -name '*.map' -o \
+    -name 'CHANGELOG' -o -name 'CHANGELOG.*' -o -name 'LICENSE.md' \
+  \) -delete; \
+  rm -rf \
+    node_modules/@next/eslint-plugin-next \
+    node_modules/lucide-react/dist/umd \
+    node_modules/lucide-react/dist/lucide-react.prefixed.d.ts \
+    node_modules/lucide-react/dist/lucide-react.suffixed.d.ts \
+    ; \
+  # Phosphor ships full SVG asset packs; React package is enough at runtime for next start.
+  rm -rf node_modules/@phosphor-icons/core/assets
+
 # ==============================================================================
 # Stage 3: Slim Runtime (no Chromium / Playwright browsers)
 # ==============================================================================
