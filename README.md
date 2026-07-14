@@ -99,13 +99,17 @@ Our `Dockerfile` is a deliberate fork of the [upstream Dockerfile](https://githu
 
 On every `VERSION` bump: manually `diff` against upstream’s Dockerfile for that tag; update `node:` / `rust:` base pins in lockstep. No sed/patch in CI.
 
-After `yarn workspaces focus --production`, the Dockerfile runs a **safe prune** (keeps `playwright` / `playwright-core` for `PLAYWRIGHT_WS_URL`):
+After `yarn workspaces focus --production`, the Dockerfile:
 
-- remove `@next/swc-*` (build-only)
-- remove unused Prisma WASM for mysql/sqlite/sqlserver (Postgres engines kept)
-- strip `*.md` / `*.map` / lucide UMD / phosphor SVG asset pack
+1. Builds web with Next.js **`output: "standalone"`** (patched via `patch-next-standalone.js`, including `outputFileTracingRoot` for the yarn monorepo).
+2. Re-focuses production deps on **root + worker** (not the full web install).
+3. Merges standalone traced `node_modules` into that tree.
+4. Runs a **safe prune** (keeps `playwright` / `playwright-core` for `PLAYWRIGHT_WS_URL`):
+   - remove `@next/swc-*` (build-only)
+   - remove unused Prisma WASM for mysql/sqlite/sqlserver (Postgres engines kept)
+   - strip `*.md` / `*.map` / lucide UMD / phosphor SVG asset pack
 
-Most remaining weight is Next.js + prod `node_modules` (~0.5–0.9 GB unpacked). Desktop “Size” is uncompressed; Hub shows compressed download.
+Runtime starts `node apps/web/server.js` (standalone) + `tsx worker.ts`. Desktop “Size” is uncompressed; Hub shows compressed download.
 
 ## Compose
 
@@ -116,7 +120,7 @@ See [`docker-compose.example.yml`](./docker-compose.example.yml) for Postgres + 
 ```bash
 git clone https://github.com/linkwarden/linkwarden.git src
 git -C src checkout "$(cat VERSION)"
-cp docker-entrypoint.sh ./src/
+cp docker-entrypoint.sh patch-next-standalone.js ./src/
 docker build -f Dockerfile -t linkwarden-slim:local ./src
 ```
 

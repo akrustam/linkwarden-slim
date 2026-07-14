@@ -20,6 +20,7 @@ on:
     paths:
       - Dockerfile
       - docker-entrypoint.sh
+      - patch-next-standalone.js
       - .github/workflows/build-publish.yml
 
 permissions:
@@ -120,9 +121,10 @@ jobs:
           ref: ${{ steps.ver.outputs.version }}
           path: src
 
-      - name: Copy entrypoint into build context
+      - name: Copy entrypoint and standalone patch into build context
         if: steps.exists.outputs.skip != 'true'
-        run: cp docker-entrypoint.sh ./src/
+        run: |
+          cp docker-entrypoint.sh patch-next-standalone.js ./src/
 
       - name: Set up QEMU
         if: steps.exists.outputs.skip != 'true'
