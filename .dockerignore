@@ -1,0 +1,16 @@
+# Build context is upstream checkout at ./src (CI copies entrypoint into it).
+# Keep context lean if someone builds with a fuller tree.
+.git
+.github
+*.md
+LICENSE
+VERSION
+docker-compose*.yml
+.dockerignore
+.gitignore
+**/node_modules
+**/.next/cache
+**/dist
+**/.yarn/cache
+**/.turbo
+**/*.log

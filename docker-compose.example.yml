@@ -1,0 +1,50 @@
+# Example stack for linkwarden-slim (no local Chromium).
+# Replace secrets and image owner/user before use.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: linkwarden
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: linkwarden
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12.8
+    environment:
+      MEILI_MASTER_KEY: change-me-meili
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meili:/meili_data
+    restart: unless-stopped
+
+  linkwarden:
+    # GHCR: ghcr.io/<owner>/linkwarden-slim:v2.15.1
+    # Hub:  docker.io/<user>/linkwarden-slim:v2.15.1
+    image: ghcr.io/OWNER/linkwarden-slim:v2.15.1
+    depends_on:
+      - postgres
+      - meilisearch
+    environment:
+      DATABASE_URL: postgresql://linkwarden:change-me@postgres:5432/linkwarden
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: change-me-nextauth
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_KEY: change-me-meili
+      # Slim default; omit or set true. For remote browser instead:
+      # DISABLE_BROWSER: "false"
+      # PLAYWRIGHT_WS_URL: ws://browser:3000/
+      DISABLE_BROWSER: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - data:/data/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  meili:
+  data:
