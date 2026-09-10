@@ -16,7 +16,7 @@ function defaultRun(command, args, { env } = {}) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('error', reject);
-    child.once('close', (exitCode) => resolve({ exitCode, stdout, stderr }));
+    child.once('close', (exitCode, signal) => resolve({ exitCode, signal, stdout, stderr }));
   });
 }
 
@@ -24,16 +24,12 @@ function resultText(result) {
   return [result?.stderr, result?.stdout, result?.message].filter(Boolean).join('\n');
 }
 
-function exitCode(result) {
-  return result?.exitCode ?? result?.code ?? result?.status ?? 0;
-}
-
 function isMissing(result) {
   const text = resultText(result);
-  return result?.statusCode === 404
+  return result?.exitCode === 1 && result?.signal === null && (result?.statusCode === 404
     || /\bMANIFEST_UNKNOWN\b/i.test(text)
     || /\b(?:status(?:\s+code)?|http)\s*[:=]?\s*404\b/i.test(text)
-    || /\(404\)/.test(text);
+    || /\(404\)/.test(text));
 }
 
 function repositoryFor(reference) {
@@ -47,10 +43,15 @@ function error(message) {
   return { kind: 'Error', message };
 }
 
+/**
+ * Run one regctl command. Injected runners must return an object with a
+ * literal numeric `exitCode`, `signal` (null on normal exit), and string
+ * `stdout`/`stderr`; only `{ exitCode: 0, signal: null }` succeeds.
+ */
 async function invoke(run, command, args, env) {
   try {
     const result = await run(command, args, { env });
-    if (exitCode(result) !== 0) {
+    if (!result || result.exitCode !== 0 || result.signal !== null) {
       return { failure: result };
     }
     return { result };

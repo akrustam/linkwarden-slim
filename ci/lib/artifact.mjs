@@ -1,12 +1,18 @@
 export const TARGET_PLATFORMS = ['linux/amd64', 'linux/arm64'];
-export const RECIPE_ID_LABEL = 'org.opencontainers.image.recipe-id';
 export const VERSION_LABEL = 'org.opencontainers.image.version';
-export const REVISION_LABEL = 'org.opencontainers.image.revision';
+export const PACKAGING_INPUTS_DIGEST_LABEL = 'org.opencontainers.image.revision';
+export const RECIPE_ID_LABEL = 'io.linkwarden-slim.recipe-id';
+export const UPSTREAM_REVISION_LABEL = 'io.linkwarden-slim.upstream-revision';
+export const PACKAGING_SOURCE_REVISION_LABEL = 'io.linkwarden-slim.packaging-source-revision';
+export const NODE_BASE_LABEL = 'io.linkwarden-slim.node-base';
+export const RUST_BASE_LABEL = 'io.linkwarden-slim.rust-base';
+export const MONOLITH_VERSION_LABEL = 'io.linkwarden-slim.monolith-version';
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RECIPE_ID = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const IMAGE_MANIFEST = /^application\/vnd\.(?:oci\.image\.manifest\.v1|docker\.distribution\.manifest\.v2)\+json$/;
+const INDEX_MANIFEST = /^application\/vnd\.(?:oci\.image\.index\.v1|docker\.distribution\.manifest\.list\.v2)\+json$/;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -28,13 +34,14 @@ function selectedLabels(config) {
   if (!isRecord(labels) || Object.values(labels).some((value) => typeof value !== 'string')) {
     return null;
   }
-  if (!RECIPE_ID.test(labels[RECIPE_ID_LABEL] ?? '')) {
-    return null;
-  }
-  if (typeof labels[VERSION_LABEL] !== 'string' || labels[VERSION_LABEL].length === 0) {
-    return null;
-  }
-  if (!REVISION.test(labels[REVISION_LABEL] ?? '')) {
+  if (!RECIPE_ID.test(labels[RECIPE_ID_LABEL] ?? '')
+    || typeof labels[VERSION_LABEL] !== 'string' || labels[VERSION_LABEL].length === 0
+    || !DIGEST.test(labels[PACKAGING_INPUTS_DIGEST_LABEL] ?? '')
+    || !REVISION.test(labels[UPSTREAM_REVISION_LABEL] ?? '')
+    || !REVISION.test(labels[PACKAGING_SOURCE_REVISION_LABEL] ?? '')
+    || !DIGEST.test(labels[NODE_BASE_LABEL] ?? '')
+    || !DIGEST.test(labels[RUST_BASE_LABEL] ?? '')
+    || typeof labels[MONOLITH_VERSION_LABEL] !== 'string' || labels[MONOLITH_VERSION_LABEL].length === 0) {
     return null;
   }
   return { ...labels };
@@ -57,7 +64,7 @@ function isAttestation(descriptor) {
  * for command and response parsing failures.
  *
  * @param {{sourceRef: string, index: object, configs: Record<string, object>}} input
- * @returns {{kind: 'Valid', recipeId: string, sourceRef: string, platformDigests: Record<string, string>, validatedLabels: Record<string, string>} | {kind: 'Conflict', message: string} | {kind: 'Error', message: string}}
+ * @returns {{kind: 'Valid', recipeId: string, sourceRef: string, platformDigests: Record<'linux/amd64'|'linux/arm64', string>, validatedLabels: Record<string, string>} | {kind: 'Conflict', message: string} | {kind: 'Error', message: string}}
  */
 export function validateArtifact({ sourceRef, index, configs } = {}) {
   if (typeof sourceRef !== 'string' || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(sourceRef)) {
@@ -65,6 +72,9 @@ export function validateArtifact({ sourceRef, index, configs } = {}) {
   }
   if (!isRecord(index) || !Array.isArray(index.manifests) || !isRecord(configs)) {
     return { kind: 'Error', message: 'Malformed artifact response' };
+  }
+  if (index.schemaVersion !== 2 || !INDEX_MANIFEST.test(index.mediaType ?? '')) {
+    return conflict('Invalid parent index envelope');
   }
 
   const selected = new Map();

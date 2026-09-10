@@ -28,8 +28,8 @@ export function buildArgsForRecipe({ recipe, nodeImage, rustImage } = {}) {
     `RECIPE_ID=${value.recipeId}`,
     `PACKAGING_INPUTS_DIGEST=${value.packagingInputsDigest}`,
     `PACKAGING_SOURCE_SHA=${value.packagingSourceSha}`,
-    `NODE_BASE_DIGEST=sha256:${value.nodeIndexDigest}`,
-    `RUST_BASE_DIGEST=sha256:${value.rustIndexDigest}`,
+    `NODE_BASE_DIGEST=${value.nodeIndexDigest}`,
+    `RUST_BASE_DIGEST=${value.rustIndexDigest}`,
   ];
 }
 

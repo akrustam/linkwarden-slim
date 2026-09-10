@@ -1,7 +1,7 @@
 import {
   RECIPE_ID_LABEL,
-  REVISION_LABEL,
   TARGET_PLATFORMS,
+  UPSTREAM_REVISION_LABEL,
   VERSION_LABEL,
   compareArtifacts,
 } from './artifact.mjs';
@@ -31,7 +31,7 @@ function throwIfUnsafe(artifact) {
 function hasUpstreamIdentity(artifact, desired) {
   return artifact?.kind === 'Valid'
     && artifact.validatedLabels[VERSION_LABEL] === desired.upstreamTag
-    && artifact.validatedLabels[REVISION_LABEL] === desired.upstreamCommit;
+    && artifact.validatedLabels[UPSTREAM_REVISION_LABEL] === desired.upstreamCommit;
 }
 
 /**

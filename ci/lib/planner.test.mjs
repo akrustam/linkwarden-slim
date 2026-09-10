@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { RECIPE_ID_LABEL, validateArtifact } from './artifact.mjs';
+import {
+  MONOLITH_VERSION_LABEL,
+  NODE_BASE_LABEL,
+  PACKAGING_INPUTS_DIGEST_LABEL,
+  PACKAGING_SOURCE_REVISION_LABEL,
+  RECIPE_ID_LABEL,
+  RUST_BASE_LABEL,
+  UPSTREAM_REVISION_LABEL,
+  VERSION_LABEL,
+  validateArtifact,
+} from './artifact.mjs';
 import {
   TARGET_PLATFORMS,
   ensureArtifact,
@@ -17,13 +27,19 @@ const upstreamCommit = hex('a', 40);
 function artifact({ recipeId, sourceDigest = hex('b', 64) }) {
   const labels = {
     [RECIPE_ID_LABEL]: recipeId,
-    'org.opencontainers.image.version': upstreamTag,
-    'org.opencontainers.image.revision': upstreamCommit,
+    [VERSION_LABEL]: upstreamTag,
+    [PACKAGING_INPUTS_DIGEST_LABEL]: `sha256:${hex('e', 64)}`,
+    [UPSTREAM_REVISION_LABEL]: upstreamCommit,
+    [PACKAGING_SOURCE_REVISION_LABEL]: hex('b', 40),
+    [NODE_BASE_LABEL]: `sha256:${hex('c', 64)}`,
+    [RUST_BASE_LABEL]: `sha256:${hex('d', 64)}`,
+    [MONOLITH_VERSION_LABEL]: '2.8.3',
   };
   return validateArtifact({
     sourceRef: `${repository}@sha256:${sourceDigest}`,
     index: {
       schemaVersion: 2,
+      mediaType: 'application/vnd.oci.image.index.v1+json',
       manifests: [
         {
           mediaType: 'application/vnd.oci.image.manifest.v1+json',

@@ -12,9 +12,9 @@ function recipe() {
     upstreamTag: 'v2.15.1',
     upstreamCommit: hex('a', 40),
     packagingSourceSha: hex('b', 40),
-    nodeIndexDigest: hex('c', 64),
-    rustIndexDigest: hex('d', 64),
-    packagingInputsDigest: hex('e', 64),
+    nodeIndexDigest: `sha256:${hex('c', 64)}`,
+    rustIndexDigest: `sha256:${hex('d', 64)}`,
+    packagingInputsDigest: `sha256:${hex('e', 64)}`,
     monolithVersion: '2.8.3',
   });
 }
@@ -32,7 +32,7 @@ test('returns all Docker build arguments in their stable order', () => {
     'UPSTREAM_TAG=v2.15.1',
     `UPSTREAM_SHA=${hex('a', 40)}`,
     `RECIPE_ID=${value.recipeId}`,
-    `PACKAGING_INPUTS_DIGEST=${hex('e', 64)}`,
+    `PACKAGING_INPUTS_DIGEST=sha256:${hex('e', 64)}`,
     `PACKAGING_SOURCE_SHA=${hex('b', 40)}`,
     `NODE_BASE_DIGEST=sha256:${hex('c', 64)}`,
     `RUST_BASE_DIGEST=sha256:${hex('d', 64)}`,

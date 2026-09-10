@@ -4,14 +4,15 @@ export const RECIPE_HEADER = 'linkwarden-slim-recipe-v1';
 
 const HEX_40 = /^[a-f0-9]{40}$/;
 const HEX_64 = /^[a-f0-9]{64}$/;
+const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 const FIELDS = [
   ['upstreamTag', isText],
   ['upstreamCommit', (value) => HEX_40.test(value)],
   ['packagingSourceSha', (value) => HEX_40.test(value)],
-  ['nodeIndexDigest', (value) => HEX_64.test(value)],
-  ['rustIndexDigest', (value) => HEX_64.test(value)],
-  ['packagingInputsDigest', (value) => HEX_64.test(value)],
+  ['nodeIndexDigest', (value) => SHA256_DIGEST.test(value)],
+  ['rustIndexDigest', (value) => SHA256_DIGEST.test(value)],
+  ['packagingInputsDigest', (value) => SHA256_DIGEST.test(value)],
   ['monolithVersion', isText],
 ];
 
@@ -82,8 +83,9 @@ export function createRecipe(recipe) {
 }
 
 /**
- * Hash packaging files in their caller-defined order. This precisely matches
- * ci/run-source-tests.sh's NUL-delimited stream contract.
+ * Hash packaging files in their caller-defined order. Each path and content
+ * buffer is length-prefixed with an unsigned 64-bit big-endian integer, which
+ * keeps arbitrary binary bytes unambiguous for ci/run-source-tests.sh.
  *
  * @param {Array<{path: string, bytes: Buffer}>} inputs
  * @returns {string}
@@ -100,7 +102,12 @@ export function packagingInputsDigest(inputs) {
     if (!Buffer.isBuffer(input.bytes)) {
       throw new TypeError('Invalid packaging input bytes');
     }
-    hash.update(input.path).update('\0').update(input.bytes).update('\0');
+    const pathBytes = Buffer.from(input.path, 'utf8');
+    const pathLength = Buffer.alloc(8);
+    const contentLength = Buffer.alloc(8);
+    pathLength.writeBigUInt64BE(BigInt(pathBytes.length));
+    contentLength.writeBigUInt64BE(BigInt(input.bytes.length));
+    hash.update(pathLength).update(pathBytes).update(contentLength).update(input.bytes);
   }
-  return hash.digest('hex');
+  return `sha256:${hash.digest('hex')}`;
 }
