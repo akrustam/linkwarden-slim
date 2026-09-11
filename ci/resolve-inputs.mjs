@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { formatSourceReference, parseDestinationReference } from './lib/reference.mjs';
+import { formatSourceReference, parseDestinationReference, parseSourceReference } from './lib/reference.mjs';
 import { createRecipe, packagingInputsDigest } from './lib/recipe.mjs';
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -15,6 +16,7 @@ const PACKAGING_PATHS = [
   'ci/run-source-tests.sh',
 ];
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const VALIDATION_FINGERPRINT_HEADER = 'linkwarden-slim-validation-fingerprint-v1';
 
 function fail(message) {
   throw new Error(message);
@@ -141,6 +143,26 @@ export async function digestPackagingInputs(packagingExport) {
   return packagingInputsDigest(inputs);
 }
 
+/**
+ * Derive the runtime-validation dependency identity from the exact resolved
+ * amd64 service references. This remains outside the application build recipe.
+ */
+export function validationFingerprintFor({ postgresImage, meiliImage }) {
+  const hash = createHash('sha256');
+  hash.update(Buffer.from(VALIDATION_FINGERPRINT_HEADER, 'utf8'));
+  for (const [name, reference] of [['postgresImage', postgresImage], ['meiliImage', meiliImage]]) {
+    parseSourceReference(reference);
+    const nameBytes = Buffer.from(name, 'utf8');
+    const referenceBytes = Buffer.from(reference, 'utf8');
+    const nameLength = Buffer.alloc(8);
+    const referenceLength = Buffer.alloc(8);
+    nameLength.writeBigUInt64BE(BigInt(nameBytes.length));
+    referenceLength.writeBigUInt64BE(BigInt(referenceBytes.length));
+    hash.update(nameLength).update(nameBytes).update(referenceLength).update(referenceBytes);
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
 export async function resolveInputs(options, { run = runCommand } = {}) {
   const [postgres, meili, node, rust, packagingInputs] = await Promise.all([
     resolveImage({ regctlPath: options['--regctl'], reference: options['--postgres'], run }),
@@ -159,17 +181,20 @@ export async function resolveInputs(options, { run = runCommand } = {}) {
     packagingInputsDigest: packagingInputs,
     monolithVersion: options['--monolith-version'],
   });
+  const postgresImage = postgres.amd64Ref;
+  const meiliImage = meili.amd64Ref;
   return {
-    meiliImage: meili.amd64Ref,
+    meiliImage,
     nodeImage: node.sourceRef,
     packagingExport: resolve(options['--packaging-export']),
     packagingUrl: options['--packaging-url'],
-    postgresImage: postgres.amd64Ref,
+    postgresImage,
     recipe,
     rustImage: rust.sourceRef,
     upstreamSha: options['--upstream-sha'],
     upstreamTag: options['--upstream-tag'],
     upstreamUrl: options['--upstream-url'],
+    validationFingerprint: validationFingerprintFor({ postgresImage, meiliImage }),
   };
 }
 

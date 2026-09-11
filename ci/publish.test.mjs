@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
   parsePublishOptions,
   publishFromOptions,
   publishInput,
+  readInput,
   validateInput,
 } from './publish.mjs';
 import { createRecipe } from './lib/recipe.mjs';
@@ -35,6 +36,7 @@ const input = {
   packagingUrl: 'https://github.com/example/linkwarden-docker.git',
   upstreamSha: recipe.upstreamCommit,
   upstreamUrl: 'https://github.com/example/linkwarden.git',
+  validationFingerprint: 'sha256:489292e5b5c50914bd2b545a0acdeda70fbce102eb8908fbe195367024eafadb',
 };
 
 function validArtifact(sourceRef) {
@@ -110,6 +112,19 @@ test('validation builds source and runtime targets with recipe args before stack
   ]);
   assert.deepEqual(bashCalls[2].args.slice(1), ['linux/amd64', input.postgresImage, 'linkwarden-ci-postgres:latest']);
   assert.deepEqual(bashCalls[3].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
+});
+
+test('readInput rejects missing and mismatched validation fingerprints', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'linkwarden-publish-input-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'input.json');
+  const { validationFingerprint: _validationFingerprint, ...withoutFingerprint } = input;
+  await writeFile(path, JSON.stringify(withoutFingerprint));
+
+  await assert.rejects(readInput(path), /validationFingerprint/i);
+  await writeFile(path, JSON.stringify({ ...input, validationFingerprint: `sha256:${hex('0', 64)}` }));
+
+  await assert.rejects(readInput(path), /validationFingerprint/i);
 });
 
 function recipeWithNodeDigest(character) {
@@ -296,6 +311,58 @@ test('publishes a requested historical version when fresh inputs supersede lates
   assert.equal(result.latest, 'skipped-stale');
   assert.equal(result.artifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
   assert.equal(result.versionArtifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:v2.10.1',
+    'docker.io/example/app:v2.10.1',
+  ]);
+});
+
+test('keeps immutable versions and skips latest when only the fresh Postgres child changes', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+  });
+  const freshInput = {
+    ...input,
+    postgresImage: `docker.io/library/postgres@sha256:${hex('a', 64)}`,
+    validationFingerprint: 'sha256:c5f826b2f39143909f286203d5fd42a1d786e54a822c0b57f42d9562f99a1eab',
+  };
+
+  const result = await publishInput(input, publishOptions({
+    freshInput,
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(result.latest, 'skipped-stale');
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:v2.10.1',
+    'docker.io/example/app:v2.10.1',
+  ]);
+});
+
+test('keeps immutable versions and skips latest when only the fresh Meilisearch child changes', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+  });
+  const freshInput = {
+    ...input,
+    meiliImage: `docker.io/getmeili/meilisearch@sha256:${hex('b', 64)}`,
+    validationFingerprint: 'sha256:de61531f164fc9d39c7f4b606286f1268ff8b64571481f4d63bc8786d7074513',
+  };
+
+  const result = await publishInput(input, publishOptions({
+    freshInput,
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(result.latest, 'skipped-stale');
   assert.deepEqual(registry.copies.map((args) => args[3]), [
     'docker.io/example/app:candidate',
     'ghcr.io/example/app:v2.10.1',

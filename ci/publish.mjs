@@ -9,7 +9,7 @@ import { compareArtifacts } from './lib/artifact.mjs';
 import { copyReference, inspectReference, inspectSourceReference } from './lib/registry.mjs';
 import { formatSourceReference, parseDestinationReference, parseSourceReference } from './lib/reference.mjs';
 import { createRecipe } from './lib/recipe.mjs';
-import { digestPackagingInputs } from './resolve-inputs.mjs';
+import { digestPackagingInputs, validationFingerprintFor } from './resolve-inputs.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -45,6 +45,10 @@ function validateInputShape(input) {
     || typeof input.upstreamUrl !== 'string' || input.upstreamUrl.length === 0
     || !SHA.test(input.upstreamSha ?? '')) {
     throw new TypeError('Invalid publish input');
+  }
+  const validationFingerprint = validationFingerprintFor(input);
+  if (!DIGEST.test(input.validationFingerprint ?? '') || input.validationFingerprint !== validationFingerprint) {
+    throw new TypeError('Invalid validationFingerprint');
   }
   return input;
 }
@@ -282,7 +286,8 @@ export async function publishInput(input, {
   } catch (cause) {
     return freshnessErrorResult(desiredArtifact, canonicalArtifact, cause);
   }
-  if (refreshed.recipe.recipeId !== recipe.recipeId) {
+  if (refreshed.recipe.recipeId !== recipe.recipeId
+    || refreshed.validationFingerprint !== input.validationFingerprint) {
     return { artifact: desiredArtifact, versionArtifact: canonicalArtifact, latest: 'skipped-stale' };
   }
   const [ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([

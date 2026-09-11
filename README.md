@@ -76,7 +76,7 @@ docker run --rm \
 | Manual dispatch | Publishes the requested `vX.Y.Z`, or the current upstream release when empty. A historical release can receive any missing immutable registry copy, but cannot move `latest` when freshly resolved inputs differ. |
 | Push to `main` affecting packaging | Runs validation only. It never writes a registry tag. |
 
-The publisher seals the default-branch packaging commit and the upstream tag's exact commit SHA before building. It resolves the Node, Rust, Postgres, and Meilisearch references to digests, then builds only from those pinned inputs.
+The publisher seals the default-branch packaging commit and the upstream tag's exact commit SHA before building. Its application build recipe records that source identity plus the resolved Node and Rust base digests. It also resolves the Postgres and Meilisearch validation dependencies to exact amd64 child references, then fingerprints those two digest-qualified refs separately as `sha256:<64 lowercase hex>` for the fresh `latest` gate. Test-only service dependencies do not change the application recipe or image labels.
 
 ### Base images
 
@@ -97,7 +97,9 @@ The CI fail-closed sequence is:
 
 There is no local Chromium in the image. The source and runtime gates use the same digest-pinned Postgres and Meilisearch service images. If input resolution, build, or any required test fails before promotion, no version or `latest` release tag is published.
 
-`vX.Y.Z` tags are immutable. A base- or packaging-only update never overwrites an existing version tag; it may advance the guarded mutable `latest` tag after the candidate passes the gates and fresh inputs still match. `latest` is evaluated after immutable promotion, so an older manual version does not replace a newer valid `latest` when current inputs have changed.
+`vX.Y.Z` tags are immutable. A base- or packaging-only update never overwrites an existing version tag; it may advance the guarded mutable `latest` tag after the candidate passes the gates and fresh inputs still match. The fresh gate requires both the sealed application build recipe and the resolved Postgres/Meilisearch validation dependency refs to match. `latest` is evaluated after immutable promotion, so an older manual version does not replace a newer valid `latest` when current inputs have changed.
+
+The exact tested artifact is the release authority. The recipe seals source and base-image identity, not a snapshot of every package repository: APT content can change between builds and is not snapshot-pinned.
 
 GHCR and Docker Hub do not support a cross-registry transaction. A failure during promotion can temporarily leave their immutable tags or `latest` tags out of sync. If a `latest` update reaches only one registry, that registry retains the new verified artifact while the other retains its existing `latest`; a later publish run reconciles missing immutable copies and retries the guarded `latest` update.
 
