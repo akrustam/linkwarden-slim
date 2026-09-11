@@ -55,9 +55,9 @@ printf 'packaging patch\n' > "$packaging_export/patch-next-standalone.js"
 printf 'packaging source tests\n' > "$packaging_export/ci/run-source-tests.sh"
 
 dest="$tmp/context"
-"${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$dest"
+"${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$dest"
 
-[ "$(git -C "$dest" rev-parse HEAD)" = "$tag_sha" ] || fail 'prepare-context did not checkout the requested tag commit'
+[ "$(git -C "$dest" rev-parse HEAD)" = "$tag_sha" ] || fail 'prepare-context did not checkout the requested resolved SHA'
 [ "$(git -C "$dest" symbolic-ref -q HEAD || true)" = '' ] || fail 'prepare-context checkout is not detached'
 [ "$(<"$dest/Dockerfile")" = 'upstream Dockerfile at tag' ] || fail 'prepare-context copied the packaging Dockerfile into the upstream context'
 [ "$(<"$dest/docker-entrypoint.sh")" = 'packaging entrypoint' ] || fail 'prepare-context did not inject the entrypoint'
@@ -68,20 +68,33 @@ dest="$tmp/context"
 nonempty_dest="$tmp/nonempty-context"
 mkdir -p "$nonempty_dest"
 printf 'keep\n' > "$nonempty_dest/sentinel"
-if "${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$nonempty_dest"; then
+if "${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$nonempty_dest"; then
   fail 'prepare-context removed a nonempty destination'
 fi
 [ "$(<"$nonempty_dest/sentinel")" = keep ] || fail 'prepare-context changed a nonempty destination'
 
 printf 'stale entrypoint\n' > "$packaging_export/docker-entrypoint.sh"
 stale_dest="$tmp/stale-context"
-"${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$stale_dest"
+"${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$stale_dest"
 [ "$(<"$stale_dest/docker-entrypoint.sh")" = 'stale entrypoint' ] || fail 'prepare-context did not use the supplied packaging export'
 printf 'packaging entrypoint\n' > "$packaging_export/docker-entrypoint.sh"
 
 sha_dest="$tmp/sha-context"
 "${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$sha_dest"
 [ "$(git -C "$sha_dest" rev-parse HEAD)" = "$tag_sha" ] || fail 'prepare-context did not checkout the requested SHA'
+
+tag_dest="$tmp/tag-context"
+if "${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$tag_dest"; then
+  fail 'prepare-context accepted a tag instead of a resolved SHA'
+fi
+[ ! -e "$tag_dest" ] || fail 'prepare-context changed the destination for a tag input'
+
+uppercase_sha=$(printf '%s' "$tag_sha" | tr '[:lower:]' '[:upper:]')
+uppercase_dest="$tmp/uppercase-context"
+if "${BASH:-bash}" "$script" "$upstream_remote" "$uppercase_sha" "$packaging_export" "$uppercase_dest"; then
+  fail 'prepare-context accepted an uppercase SHA'
+fi
+[ ! -e "$uppercase_dest" ] || fail 'prepare-context changed the destination for an uppercase SHA input'
 
 if PATH="$fake_bin:$PATH" REQUESTED_SHA="$tag_sha" FETCHED_SHA="$newer_sha" REAL_GIT="$real_git" \
   "${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$tmp/mismatched-context"; then

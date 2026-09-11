@@ -11,6 +11,11 @@ upstream_ref=$2
 packaging_export_dir=$3
 destination=$4
 
+if [[ ! "$upstream_ref" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'UPSTREAM_REF must be a full lowercase 40-character SHA: %s\n' "$upstream_ref" >&2
+  exit 1
+fi
+
 required_exports=(
   docker-entrypoint.sh
   patch-next-standalone.js
@@ -45,13 +50,7 @@ git -C "$destination" fetch -q --no-tags origin "$upstream_ref"
 git -C "$destination" checkout -q --detach FETCH_HEAD
 
 resolved_sha=$(git -C "$destination" rev-parse HEAD)
-fetched_sha=$(git -C "$destination" rev-parse FETCH_HEAD)
-if [ "$resolved_sha" != "$fetched_sha" ]; then
-  printf 'upstream checkout does not match requested ref\n' >&2
-  exit 1
-fi
-
-if [[ "$upstream_ref" =~ ^[0-9a-f]{40}$ ]] && [ "$resolved_sha" != "$upstream_ref" ]; then
+if [ "$resolved_sha" != "$upstream_ref" ]; then
   printf 'upstream checkout does not match requested SHA\n' >&2
   exit 1
 fi
