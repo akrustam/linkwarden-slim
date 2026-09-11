@@ -129,12 +129,13 @@ See [`docker-compose.example.yml`](./docker-compose.example.yml) for Postgres + 
 
 ## Local build
 
+For a verified local `source-deps` context build, run:
+
 ```bash
-git clone https://github.com/linkwarden/linkwarden.git src
-git -C src checkout "$(cat VERSION)"
-cp docker-entrypoint.sh patch-next-standalone.js ./src/
-docker build -f Dockerfile -t linkwarden-slim:local ./src
+bash ci/dockerfile-context.test.sh
 ```
+
+The harness materializes the packaging export, resolves an upstream commit SHA, prepares the required build context (including `mobile-package.json`), and builds the Dockerfile `source-deps` target when Docker is available. Release builds instead seal the packaging and upstream inputs in the publish workflow before building.
 
 ## Publishing setup (maintainers)
 
