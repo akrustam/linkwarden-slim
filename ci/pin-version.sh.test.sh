@@ -43,7 +43,9 @@ case "$1" in
   push)
     [ "$2" = origin ] && [ "$3" = HEAD:main ]
     count=0
-    [ ! -f "$PUSH_COUNT" ] || count=$(<"$PUSH_COUNT")
+    if [ -f "$PUSH_COUNT" ]; then
+      IFS= read -r count < "$PUSH_COUNT"
+    fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$PUSH_COUNT"
     if [ "${FAIL_FIRST_PUSH:-false}" = true ] && [ "$count" -eq 1 ]; then
@@ -57,6 +59,17 @@ case "$1" in
 esac
 EOF
 chmod +x "$fake_bin/gh" "$fake_bin/git"
+
+# GitHub Ubuntu runs /bin/sh as dash, so the fake must not rely on Bash-only syntax.
+rm -f "$tmp/push-count"
+if FAIL_FIRST_PUSH=true GIT_LOG="$tmp/git.log" PUSH_COUNT="$tmp/push-count" dash "$fake_bin/git" push origin HEAD:main 2>/dev/null; then
+  fail 'fake git did not fail its configured first push'
+fi
+if ! FAIL_FIRST_PUSH=true GIT_LOG="$tmp/git.log" PUSH_COUNT="$tmp/push-count" dash "$fake_bin/git" push origin HEAD:main; then
+  fail 'fake git did not complete its retry under dash'
+fi
+[ "$(<"$tmp/push-count")" = 2 ] || fail 'fake git did not count a dash retry'
+rm -f "$tmp/push-count"
 
 run_pin() {
   PATH="$fake_bin:$PATH" \
