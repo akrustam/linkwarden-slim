@@ -19,6 +19,23 @@ grep -Fq 'ARG RUST_IMAGE=rust:1.96-bookworm' "$dockerfile" \
 if grep -Fq 'COPY apps/extension/package.json ./apps/extension/' "$dockerfile"; then
   fail 'Dockerfile still requires the removed apps/extension workspace'
 fi
+if grep -Fq 'mobile-package.json' "$dockerfile"; then
+  fail 'Dockerfile still relies on the mobile workspace manifest workaround'
+fi
+if grep -Fq 'COPY apps/' "$dockerfile" || grep -Fq 'COPY packages/' "$dockerfile"; then
+  fail 'Dockerfile still enumerates workspace manifests'
+fi
+
+source_deps_start=$(grep -n '^FROM ${NODE_IMAGE} AS source-deps$' "$dockerfile" | cut -d: -f1)
+source_deps_end=$(grep -n '^FROM source-deps AS source-test$' "$dockerfile" | cut -d: -f1)
+full_source_copy_line=$(grep -n '^COPY \. \.$' "$dockerfile" | cut -d: -f1 | awk -F: -v start="$source_deps_start" -v end="$source_deps_end" '$1 > start && $1 < end { print $1; exit }')
+immutable_install_line=$(grep -n 'yarn install --immutable' "$dockerfile" | cut -d: -f1 | awk -F: -v start="$source_deps_start" -v end="$source_deps_end" '$1 > start && $1 < end { print $1; exit }')
+
+[ -n "$source_deps_start" ] || fail 'Dockerfile is missing source-deps stage'
+[ -n "$source_deps_end" ] || fail 'Dockerfile is missing source-test stage'
+[ -n "$full_source_copy_line" ] || fail 'source-deps does not copy the complete upstream source'
+[ -n "$immutable_install_line" ] || fail 'source-deps does not retain yarn install --immutable'
+[ "$full_source_copy_line" -lt "$immutable_install_line" ] || fail 'source-deps copies the complete source after immutable install'
 
 for path in \
   "$script_dir/materialize-packaging.sh" \
@@ -55,16 +72,17 @@ packaging_export="$tmp/packaging-export"
   || fail 'materializer did not export the source-test launcher'
 
 upstream_remote="$tmp/upstream.git"
-upstream_sha=$(git ls-remote https://github.com/linkwarden/linkwarden.git refs/tags/v2.15.1 | cut -f1)
-[ -n "$upstream_sha" ] || fail 'could not resolve upstream v2.15.1'
+upstream_sha=$(git ls-remote https://github.com/linkwarden/linkwarden.git refs/tags/v2.16.3 | cut -f1)
+[ -n "$upstream_sha" ] || fail 'could not resolve upstream v2.16.3'
 git init -q --bare "$upstream_remote"
 git --git-dir="$upstream_remote" fetch -q --no-tags https://github.com/linkwarden/linkwarden.git "$upstream_sha"
 
 context="$tmp/context"
 "${BASH:-bash}" "$script_dir/prepare-context.sh" "file://$upstream_remote" "$upstream_sha" "$packaging_export/export" "$context"
 
-[ -f "$context/apps/mobile/package.json" ] || fail 'upstream v2.15.1 is missing apps/mobile/package.json'
-[ ! -e "$context/apps/extension/package.json" ] || fail 'upstream v2.15.1 unexpectedly contains apps/extension/package.json'
+[ -f "$context/apps/mobile/package.json" ] || fail 'upstream v2.16.3 is missing apps/mobile/package.json'
+[ -f "$context/apps/extension/package.json" ] || fail 'upstream v2.16.3 is missing apps/extension/package.json'
+[ ! -e "$context/mobile-package.json" ] || fail 'prepare-context still stages a mobile workspace manifest workaround'
 [ -f "$context/run-source-tests.sh" ] || fail 'prepare-context did not place the source-test launcher at the build-context root'
 [ -f "$packaging_export/export/Dockerfile" ] \
   || fail 'packaging Dockerfile is missing from the materialized export'

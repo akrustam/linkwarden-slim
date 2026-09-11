@@ -19,13 +19,9 @@ git -C "$upstream_seed" config user.name test
 git -C "$upstream_seed" config user.email test@example.invalid
 printf 'upstream Dockerfile at tag\n' > "$upstream_seed/Dockerfile"
 printf 'tag source\n' > "$upstream_seed/source.txt"
+printf 'apps/mobile\n' > "$upstream_seed/.dockerignore"
 git -C "$upstream_seed" add .
 git -C "$upstream_seed" commit -qm tagged
-mkdir -p "$upstream_seed/apps/mobile"
-printf '{"name":"@linkwarden/mobile"}\n' > "$upstream_seed/apps/mobile/package.json"
-printf 'apps/mobile\n' > "$upstream_seed/.dockerignore"
-git -C "$upstream_seed" add apps/mobile/package.json .dockerignore
-git -C "$upstream_seed" commit -qm mobile-workspace
 tag_sha=$(git -C "$upstream_seed" rev-parse HEAD)
 git -C "$upstream_seed" tag v1.0.0
 printf 'upstream Dockerfile after tag\n' > "$upstream_seed/Dockerfile"
@@ -63,7 +59,8 @@ dest="$tmp/context"
 [ "$(<"$dest/docker-entrypoint.sh")" = 'packaging entrypoint' ] || fail 'prepare-context did not inject the entrypoint'
 [ "$(<"$dest/patch-next-standalone.js")" = 'packaging patch' ] || fail 'prepare-context did not inject the standalone patch'
 [ "$(<"$dest/run-source-tests.sh")" = 'packaging source tests' ] || fail 'prepare-context did not inject the source-test launcher'
-[ "$(<"$dest/mobile-package.json")" = '{"name":"@linkwarden/mobile"}' ] || fail 'prepare-context did not stage the ignored mobile workspace manifest'
+[ ! -e "$dest/mobile-package.json" ] || fail 'prepare-context staged an obsolete mobile workspace manifest workaround'
+[ ! -e "$dest/.dockerignore" ] || fail 'prepare-context retained the upstream Docker build exclusions'
 
 nonempty_dest="$tmp/nonempty-context"
 mkdir -p "$nonempty_dest"

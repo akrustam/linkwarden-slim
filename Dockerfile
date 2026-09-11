@@ -14,16 +14,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /data
 RUN corepack enable
 
-COPY package.json yarn.lock .yarnrc.yml ./
-COPY mobile-package.json ./apps/mobile/package.json
-COPY apps/web/package.json ./apps/web/
-COPY apps/worker/package.json ./apps/worker/
-COPY packages/filesystem/package.json ./packages/filesystem/
-COPY packages/lib/package.json ./packages/lib/
-COPY packages/prisma/package.json ./packages/prisma/
-COPY packages/router/package.json ./packages/router/
-COPY packages/types/package.json ./packages/types/
-COPY patches ./patches
+COPY . .
 
 RUN node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package.json", "utf8")); p.scripts={...(p.scripts||{}),postinstall:"patch-package"}; fs.writeFileSync("package.json", JSON.stringify(p, null, 2)); const w="apps/web/package.json"; const q=JSON.parse(fs.readFileSync(w, "utf8")); if(q.scripts) delete q.scripts.postinstall; fs.writeFileSync(w, JSON.stringify(q, null, 2));'
 RUN --mount=type=cache,sharing=locked,target=/root/.yarn/berry/cache \

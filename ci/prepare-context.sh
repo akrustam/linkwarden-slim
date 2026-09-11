@@ -55,12 +55,7 @@ if [ "$resolved_sha" != "$upstream_ref" ]; then
   exit 1
 fi
 
-if [ ! -f "$destination/apps/mobile/package.json" ]; then
-  printf 'missing required upstream workspace manifest: apps/mobile/package.json\n' >&2
-  exit 1
-fi
-
-cp "$destination/apps/mobile/package.json" "$destination/mobile-package.json"
+rm -f "$destination/.dockerignore"
 
 for path in "${required_exports[@]}"; do
   cp "$packaging_export_dir/$path" "$destination/${path#ci/}"

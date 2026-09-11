@@ -98,7 +98,7 @@ for required in \
   'FROM ${RUST_IMAGE} AS monolith-builder' \
   'cargo install --locked monolith@${MONOLITH_VERSION}' \
   'FROM ${NODE_IMAGE} AS source-deps' \
-  'COPY mobile-package.json ./apps/mobile/package.json' \
+  'COPY . .' \
   'yarn install --immutable' \
   'FROM source-deps AS source-test' \
   'CMD ["/usr/local/bin/run-source-tests.sh"]' \
@@ -115,8 +115,12 @@ for required in \
   grep -Fq "$required" "$dockerfile" || fail "Dockerfile is missing: $required"
 done
 
-if grep -Fq 'COPY apps/extension/package.json ./apps/extension/' "$dockerfile"; then
-  fail 'Dockerfile requires an upstream apps/extension manifest'
+if grep -Fq 'mobile-package.json' "$dockerfile"; then
+  fail 'Dockerfile requires a mobile workspace manifest workaround'
+fi
+
+if grep -Fq 'COPY apps/' "$dockerfile" || grep -Fq 'COPY packages/' "$dockerfile"; then
+  fail 'Dockerfile enumerates upstream workspace manifests'
 fi
 
 if grep -Fq 'node:22' "$dockerfile"; then
