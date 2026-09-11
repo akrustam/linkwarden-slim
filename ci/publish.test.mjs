@@ -196,7 +196,7 @@ function validatedArtifact(artifact, repository = 'ghcr.io/example/app') {
   };
 }
 
-function registryFixture({ artifacts, tags = {}, inspections = {} }) {
+function registryFixture({ artifacts, tags = {}, inspections = {}, missingResponse = 'MANIFEST_UNKNOWN: manifest unknown' }) {
   const byParent = new Map(artifacts.map((current) => [current.parentDigest, current]));
   const byChild = new Map(artifacts.flatMap((current) => Object.entries(current.childDigests).map(([platform, digest]) => [digest, { platform, labels: current.labels }])));
   const currentTags = new Map(Object.entries(tags));
@@ -209,7 +209,7 @@ function registryFixture({ artifacts, tags = {}, inspections = {} }) {
     if (args[0] === 'manifest' && args[1] === 'head') {
       const sequence = inspectionSequences.get(args[2]);
       const current = sequence?.length > 0 ? sequence.shift() : currentTags.get(args[2]);
-      return current ? ok(`${current.parentDigest}\n`) : { exitCode: 1, signal: null, stdout: '', stderr: 'MANIFEST_UNKNOWN: manifest unknown' };
+      return current ? ok(`${current.parentDigest}\n`) : { exitCode: 1, signal: null, stdout: '', stderr: missingResponse };
     }
     if (args[0] === 'manifest' && args[1] === 'get') {
       const current = byParent.get(args[2].split('@')[1]);
@@ -334,6 +334,26 @@ test('a GHCR version promotion occurs before any Docker Hub operation', async ()
 
   assert.equal(registry.calls.some((args) => args.some((value) => value.includes('docker.io/example/app'))), false);
   assert.deepEqual(registry.copies.map((args) => args[3]), ['ghcr.io/example/app:v2.10.1']);
+});
+
+test('authenticated GHCR and Docker publishing accepts the exact regctl not-found response', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+    missingResponse: 'request failed: not found [http 404]:',
+  });
+  const run = async () => ({ exitCode: 0, signal: null });
+
+  const result = await publishGhcrInput(input, publishOptions({ registryRun: registry.registryRun, run }));
+  await mirrorDockerInput(input, mirrorOptions(result, { registryRun: registry.registryRun }));
+
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:v2.10.1',
+    'ghcr.io/example/app:latest',
+    'docker.io/example/app:v2.10.1',
+    'docker.io/example/app:latest',
+  ]);
 });
 
 test('reuses and tests a full-recipe GHCR candidate without rebuilding', async () => {

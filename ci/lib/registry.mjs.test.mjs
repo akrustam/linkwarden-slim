@@ -158,7 +158,7 @@ test('accepts the digest output form from manifest head', async () => {
   assert.equal(result.sourceRef, `${repository}@${parentDigest}`);
 });
 
-test('classifies only manifest unknown or actual 404 responses as missing', async () => {
+test('classifies only manifest unknown responses as missing by default', async () => {
   const missing = await inspectReference({
     regctlPath: 'regctl',
     reference: `${repository}:missing`,
@@ -178,6 +178,31 @@ test('classifies only manifest unknown or actual 404 responses as missing', asyn
   assert.equal(missing.kind, 'Missing');
   assert.equal(unauthorized.kind, 'Error');
   assert.equal(generic404.kind, 'Error');
+});
+
+test('allows only the known regctl not-found response when explicitly requested', async () => {
+  const knownNotFound = 'failed to request manifest head registry.example/linkwarden-slim:missing: request failed: not found [http 404]: ';
+  const defaultResult = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:missing`,
+    run: async () => ok('', { exitCode: 1, stderr: knownNotFound }),
+  });
+  const allowedResult = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:missing`,
+    allowNotFound: true,
+    run: async () => ok('', { exitCode: 1, stderr: knownNotFound }),
+  });
+  const wrong404 = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:missing`,
+    allowNotFound: true,
+    run: async () => ok('', { exitCode: 1, stderr: 'request failed: unavailable [http 404]:' }),
+  });
+
+  assert.equal(defaultResult.kind, 'Error');
+  assert.equal(allowedResult.kind, 'Missing');
+  assert.equal(wrong404.kind, 'Error');
 });
 
 test('reports malformed manifest-head output as an error instead of throwing', async () => {

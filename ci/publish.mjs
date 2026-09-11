@@ -154,7 +154,7 @@ function stagingSourceFromMetadata(staging, metadataText) {
 async function createImmutableArtifact({ regctlPath, source, destination, expected, run }) {
   // Registries do not expose a portable conditional create, so reject a tag
   // that appears during the final pre-copy check instead of replacing it.
-  const rechecked = await inspectReference({ regctlPath, reference: destination, run });
+  const rechecked = await inspectReference({ regctlPath, reference: destination, allowNotFound: true, run });
   requireSafeInspection(rechecked, destination);
   if (rechecked.kind === 'Valid') {
     if (!compareArtifacts(expected, rechecked)) {
@@ -163,7 +163,7 @@ async function createImmutableArtifact({ regctlPath, source, destination, expect
     return rechecked;
   }
   await copyReference({ regctlPath, source, destination, run });
-  const copied = await inspectReference({ regctlPath, reference: destination, run });
+  const copied = await inspectReference({ regctlPath, reference: destination, allowNotFound: true, run });
   if (!compareArtifacts(expected, copied)) {
     throw new Error(`${destination} does not match the expected immutable artifact`);
   }
@@ -172,14 +172,14 @@ async function createImmutableArtifact({ regctlPath, source, destination, expect
 
 async function copyAndVerifyArtifact({ regctlPath, source, destination, expected, run }) {
   await copyReference({ regctlPath, source, destination, run });
-  const copied = await inspectReference({ regctlPath, reference: destination, run });
+  const copied = await inspectReference({ regctlPath, reference: destination, allowNotFound: true, run });
   if (!compareArtifacts(expected, copied)) {
     throw new Error(`${destination} does not match the expected artifact`);
   }
 }
 
 async function requireCandidate({ regctlPath, reference, expected, run }) {
-  const candidate = await inspectReference({ regctlPath, reference, run });
+  const candidate = await inspectReference({ regctlPath, reference, allowNotFound: true, run });
   if (!compareArtifacts(expected, candidate)) {
     throw new Error(`${reference} does not match the verified artifact`);
   }
@@ -238,8 +238,8 @@ export async function publishGhcrInput(input, {
   const recipe = input.recipe;
   for (const reference of [staging, ghcrCandidate, ghcrVersion, ghcrLatest]) parseDestinationReference(reference);
   const [initialGhcrCandidate, initialGhcrVersion] = await Promise.all([
-    inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
-    inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
+    inspectReference({ regctlPath, reference: ghcrCandidate, allowNotFound: true, run: registryRun }),
+    inspectReference({ regctlPath, reference: ghcrVersion, allowNotFound: true, run: registryRun }),
   ]);
   for (const [artifact, reference] of [
     [initialGhcrCandidate, ghcrCandidate], [initialGhcrVersion, ghcrVersion],
@@ -292,7 +292,7 @@ export async function publishGhcrInput(input, {
     || refreshed.validationFingerprint !== input.validationFingerprint) {
     return publishResult({ desiredArtifact, versionArtifact, latest: 'skipped-stale' });
   }
-  const ghcrLatestArtifact = await inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun });
+  const ghcrLatestArtifact = await inspectReference({ regctlPath, reference: ghcrLatest, allowNotFound: true, run: registryRun });
   requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
   if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) {
     await copyAndVerifyArtifact({ regctlPath, source: desiredArtifact.sourceRef, destination: ghcrLatest, expected: desiredArtifact, run: registryRun });
@@ -387,8 +387,8 @@ export async function mirrorDockerInput(input, {
   requirePublishResult(result);
   for (const reference of [ghcrCandidate, ghcrVersion, ghcrLatest, dockerVersion, dockerLatest]) parseDestinationReference(reference);
   const [checkedGhcrVersion, checkedDockerVersion] = await Promise.all([
-    inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
+    inspectReference({ regctlPath, reference: ghcrVersion, allowNotFound: true, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerVersion, allowNotFound: true, run: registryRun }),
   ]);
   requireSafeInspection(checkedGhcrVersion, ghcrVersion);
   requireSafeInspection(checkedDockerVersion, dockerVersion);
@@ -400,9 +400,9 @@ export async function mirrorDockerInput(input, {
   let dockerLatestArtifact;
   if (result.latest === 'published') {
     [ghcrCandidateArtifact, ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
-      inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
-      inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
-      inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
+      inspectReference({ regctlPath, reference: ghcrCandidate, allowNotFound: true, run: registryRun }),
+      inspectReference({ regctlPath, reference: ghcrLatest, allowNotFound: true, run: registryRun }),
+      inspectReference({ regctlPath, reference: dockerLatest, allowNotFound: true, run: registryRun }),
     ]);
     requireSafeInspection(ghcrCandidateArtifact, ghcrCandidate);
     requireSafeInspection(ghcrLatestArtifact, ghcrLatest);

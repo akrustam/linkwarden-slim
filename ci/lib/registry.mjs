@@ -52,11 +52,12 @@ function resultText(result) {
   return [result?.stderr, result?.stdout, result?.message].filter(Boolean).join('\n');
 }
 
-function isMissing(result) {
+function isMissing(result, allowNotFound) {
   const text = resultText(result);
   return result?.exitCode === 1
     && result?.signal === null
-    && /\bMANIFEST_UNKNOWN\b/i.test(text);
+    && ( /\bMANIFEST_UNKNOWN\b/i.test(text)
+      || (allowNotFound === true && /request failed: not found \[http 404\]:/i.test(text)));
 }
 
 function parentDigestFromHead(stdout) {
@@ -227,10 +228,10 @@ export async function inspectSourceReference({ regctlPath, sourceRef, env, run =
 /**
  * Resolve a mutable tag once, then inspect its immutable parent source.
  *
- * @param {{regctlPath: string, reference: string, env?: NodeJS.ProcessEnv, run?: Function}} input
+ * @param {{regctlPath: string, reference: string, allowNotFound?: boolean, env?: NodeJS.ProcessEnv, run?: Function}} input
  * @returns {Promise<object>}
  */
-export async function inspectReference({ regctlPath, reference, env, run = defaultRun } = {}) {
+export async function inspectReference({ regctlPath, reference, allowNotFound = false, env, run = defaultRun } = {}) {
   let parsedReference;
   try {
     parsedReference = parseDestinationReference(reference);
@@ -242,7 +243,7 @@ export async function inspectReference({ regctlPath, reference, env, run = defau
   }
   const head = await invoke(run, regctlPath, ['manifest', 'head', reference, '--require-digest'], env);
   if (head.failure) {
-    return isMissing(head.failure)
+    return isMissing(head.failure, allowNotFound)
       ? { kind: 'Missing' }
       : error(`Unable to inspect ${reference}: ${resultText(head.failure) || 'regctl failed'}`);
   }
