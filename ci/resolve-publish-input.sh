@@ -2,13 +2,19 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: %s --out FILE --regctl PATH --packaging-url URL --upstream-url URL --postgres REF --meili REF --node REF --rust REF --monolith-version VERSION (--upstream-tag TAG | --latest-upstream) (--packaging-sha SHA | --packaging-main)\n' "$0" >&2
+  printf 'usage: %s [--print-fresh-args] --regctl PATH --packaging-url URL --upstream-url URL --postgres REF --meili REF --node REF --rust REF --monolith-version VERSION\n' "$0" >&2
+  printf '       %s --out FILE --regctl PATH --packaging-url URL --upstream-url URL --postgres REF --meili REF --node REF --rust REF --monolith-version VERSION (--upstream-tag TAG | --latest-upstream) (--packaging-sha SHA | --packaging-main)\n' "$0" >&2
   exit 64
 }
 
 while [ "$#" -gt 0 ]; do
   flag=$1
   case "$flag" in
+    --print-fresh-args)
+      [ -z "${print_fresh_args:-}" ] || usage
+      print_fresh_args=true
+      shift
+      ;;
     --latest-upstream)
       [ -z "${latest_upstream:-}" ] || usage
       latest_upstream=true
@@ -40,9 +46,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for required in output_path regctl_path packaging_url upstream_url postgres_ref meili_ref node_ref rust_ref monolith_version; do
+for required in regctl_path packaging_url upstream_url postgres_ref meili_ref node_ref rust_ref monolith_version; do
   [ -n "${!required:-}" ] || usage
 done
+if [ -n "${print_fresh_args:-}" ]; then
+  [ -z "${output_path:-}" ] || usage
+  [ -z "${latest_upstream:-}" ] || usage
+  [ -z "${packaging_main:-}" ] || usage
+  [ -z "${upstream_tag:-}" ] || usage
+  [ -z "${packaging_sha:-}" ] || usage
+  # Stable publish.mjs --fresh-args order: modes, regctl, packaging, upstream,
+  # postgres, meili, node, rust, then monolith version.
+  node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' -- \
+    --latest-upstream \
+    --packaging-main \
+    --regctl "$regctl_path" \
+    --packaging-url "$packaging_url" \
+    --upstream-url "$upstream_url" \
+    --postgres "$postgres_ref" \
+    --meili "$meili_ref" \
+    --node "$node_ref" \
+    --rust "$rust_ref" \
+    --monolith-version "$monolith_version"
+  exit 0
+fi
+
+[ -n "${output_path:-}" ] || usage
 if [ -n "${upstream_tag:-}" ]; then
   [ -z "${latest_upstream:-}" ] || usage
 else
@@ -56,7 +85,12 @@ fi
 
 if [ -z "${upstream_tag:-}" ]; then
   : "${GH_TOKEN:?GH_TOKEN is required for --latest-upstream}"
-  upstream_tag="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)"
+  if ! [[ "$upstream_url" =~ ^https://github\.com/([^/]+)/([^/]+)\.git$ ]]; then
+    printf 'UPSTREAM_URL must be an HTTPS GitHub repository URL ending in .git: %s\n' "$upstream_url" >&2
+    exit 1
+  fi
+  upstream_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  upstream_tag="$(gh api "repos/$upstream_repo/releases/latest" --jq .tag_name)"
 fi
 if ! [[ "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Upstream release is not a supported tag: %s\n' "$upstream_tag" >&2

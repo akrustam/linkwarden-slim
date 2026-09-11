@@ -149,16 +149,20 @@ jobs:
           recipe_id="$(node -e 'process.stdout.write(require(process.argv[1]).recipe.recipeId)' "$input_json")"
           version="$(node -e 'process.stdout.write(require(process.argv[1]).upstreamTag)' "$input_json")"
           owner_lc="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          fresh_args="$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' \
-            --latest-upstream --packaging-main --regctl "$regctl_path" \
-            --packaging-url "$packaging_url" --upstream-url "$UPSTREAM_URL" \
-            --postgres "$POSTGRES_REF" --meili "$MEILI_REF" --node "$NODE_REF" \
-            --rust "$RUST_REF" --monolith-version "$MONOLITH_VERSION")"
+          FRESH_ARGS="$(bash ci/resolve-publish-input.sh --print-fresh-args \
+            --regctl "$regctl_path" \
+            --packaging-url "$packaging_url" \
+            --upstream-url "$UPSTREAM_URL" \
+            --postgres "$POSTGRES_REF" \
+            --meili "$MEILI_REF" \
+            --node "$NODE_REF" \
+            --rust "$RUST_REF" \
+            --monolith-version "$MONOLITH_VERSION")"
           {
             echo "INPUT_JSON=$input_json"
             echo "REGCTL_PATH=$regctl_path"
             echo "FRESH_COMMAND=ci/resolve-publish-input.sh"
-            echo "FRESH_ARGS=$fresh_args"
+            echo "FRESH_ARGS=$FRESH_ARGS"
             echo "SELECTED_VERSION=$version"
             echo "RECIPE_ID=$recipe_id"
             echo "GHCR_BASE=ghcr.io/$owner_lc/$IMAGE_NAME"
@@ -215,61 +219,13 @@ jobs:
             --docker-latest "${docker_base}:latest" \
             --result-in "$RUNNER_TEMP/ghcr-publish-result.json" \
             --result-out "$result_path"
-          node -e '
-            const { appendFileSync, readFileSync } = require("node:fs");
-            const resultPath = process.argv[1];
-            const result = JSON.parse(readFileSync(resultPath, "utf8"));
-            if (!["published", "skipped-stale", "skipped-freshness-error"].includes(result.latest)) {
-              throw new Error("Invalid publish result");
-            }
-            const version = process.env.SELECTED_VERSION;
-            let summary;
-            if (result.latest === "published") {
-              summary = `## Latest moved\n\n- Version \`${version}\` was published or reconciled.\n- The \`latest\` tags were moved to this release.`;
-            } else if (result.latest === "skipped-stale") {
-              summary = `## Version published; latest unchanged\n\n- Version \`${version}\` was published or reconciled.\n- The \`latest\` tags were not moved because fresher publish inputs were resolved.`;
-            } else {
-              summary = `## Latest gate resolution failed\n\n- Version \`${version}\` was published or reconciled to GHCR and mirrored to Docker Hub.\n- The \`latest\` tags were not moved; retry this run to resolve the gate.`;
-            }
-            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-            appendFileSync(process.env.GITHUB_ENV, `LATEST_PUBLISHED=${result.latest === "published"}\n`);
-            if (result.latest === "skipped-freshness-error") process.exitCode = 1;
-          ' "$result_path"
+          node ci/summarize-publish.mjs \
+            --result "$result_path" \
+            --version "$SELECTED_VERSION" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --env "$GITHUB_ENV"
 
       - name: Update VERSION pin for the current release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if [ "$LATEST_PUBLISHED" != true ]; then
-            printf 'Not updating VERSION: latest was not moved by this publish run\n'
-            exit 0
-          fi
-          reconcile_version_pin() {
-            git fetch origin main || return 1
-            git checkout -B main origin/main || return 1
-
-            latest_version="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)" || return 1
-            if [ "$SELECTED_VERSION" != "$latest_version" ]; then
-              printf 'Not updating VERSION: %s is not the current upstream release %s\n' "$SELECTED_VERSION" "$latest_version"
-              return 0
-            fi
-
-            current_version="$(tr -d '[:space:]' < VERSION)" || return 1
-            if [ "$current_version" = "$SELECTED_VERSION" ]; then
-              printf 'VERSION already pins %s\n' "$SELECTED_VERSION"
-              return 0
-            fi
-
-            printf '%s\n' "$SELECTED_VERSION" > VERSION || return 1
-            git config user.name "github-actions[bot]" || return 1
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || return 1
-            git add VERSION || return 1
-            git commit -m "chore: pin VERSION to ${SELECTED_VERSION}" || return 1
-            git push origin HEAD:main
-          }
-
-          if ! reconcile_version_pin; then
-            printf 'VERSION pin push failed; reconciling once with origin/main\n' >&2
-            reconcile_version_pin
-          fi
+        run: bash ci/pin-version.sh

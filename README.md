@@ -93,7 +93,7 @@ The CI fail-closed sequence is:
 3. Build and smoke-test the amd64 runtime.
 4. Push a GHCR-only staging image, then smoke-test its amd64 and arm64 runtime images.
 5. Verify the browser invariant on each runtime image: there is no Chromium, and a browser-enabled configuration without a remote Playwright endpoint must fail.
-6. Promote the verified artifact to GHCR, mirror it to Docker Hub, and only then consider `latest`.
+6. Test and promote the candidate, version, and guarded `latest` tags in GHCR under the freshness gate; then mirror the verified GHCR version and, when guarded `latest` moved, the GHCR `latest` tag to Docker Hub.
 
 There is no local Chromium in the image. The source and runtime gates use the same digest-pinned Postgres and Meilisearch service images. If input resolution, build, or any required test fails before promotion, no version or `latest` release tag is published.
 
@@ -131,10 +131,10 @@ See [`docker-compose.example.yml`](./docker-compose.example.yml) for Postgres + 
 
 ## Local build
 
-For a verified local `source-deps` context build, run:
+By default, the harness runs static context checks only. For a real verified local `source-deps` context build, run:
 
 ```bash
-bash ci/dockerfile-context.test.sh
+CI_RUN_NETWORK_TESTS=1 bash ci/dockerfile-context.test.sh
 ```
 
 The harness materializes the packaging export, resolves an upstream commit SHA, prepares the required build context (including `mobile-package.json`), and builds the Dockerfile `source-deps` target when Docker is available. Release builds instead seal the packaging and upstream inputs in the publish workflow before building.
