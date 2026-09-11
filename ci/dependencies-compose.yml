@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: ${CI_POSTGRES_IMAGE:?CI_POSTGRES_IMAGE is required}
+    platform: linux/amd64
+    pull_policy: never
+    restart: 'no'
+    environment:
+      POSTGRES_USER: linkwarden
+      POSTGRES_PASSWORD: ci-password
+      POSTGRES_DB: linkwarden
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linkwarden -d linkwarden"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 5s
+
+  meilisearch:
+    image: ${CI_MEILI_IMAGE:?CI_MEILI_IMAGE is required}
+    platform: linux/amd64
+    pull_policy: never
+    restart: 'no'
+    environment:
+      MEILI_MASTER_KEY: ci-meilisearch-key
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meilisearch-data:/meili_data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7700/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  meilisearch-data:

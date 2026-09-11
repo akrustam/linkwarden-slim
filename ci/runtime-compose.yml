@@ -1,0 +1,27 @@
+services:
+  linkwarden:
+    image: ${CI_IMAGE_REF:?CI_IMAGE_REF is required}
+    platform: ${CI_PLATFORM:?CI_PLATFORM is required}
+    pull_policy: never
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://linkwarden:ci-password@postgres:5432/linkwarden
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ci-nextauth-secret-not-for-production
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_KEY: ci-meilisearch-key
+      DISABLE_BROWSER: "true"
+    ports:
+      - target: 3000
+        protocol: tcp
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--silent", "--fail", "http://127.0.0.1:3000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 30s
