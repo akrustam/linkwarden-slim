@@ -16,11 +16,11 @@ Replace `<owner>` / `<user>` with your GitHub org/user and Docker Hub username a
 
 ```bash
 # GHCR
-docker pull ghcr.io/<owner>/linkwarden-slim:v2.15.1
+docker pull ghcr.io/<owner>/linkwarden-slim:vX.Y.Z
 docker pull ghcr.io/<owner>/linkwarden-slim:latest
 
 # Docker Hub
-docker pull docker.io/<user>/linkwarden-slim:v2.15.1
+docker pull docker.io/<user>/linkwarden-slim:vX.Y.Z
 docker pull docker.io/<user>/linkwarden-slim:latest
 ```
 
@@ -63,35 +63,47 @@ Example — remote Playwright:
 docker run --rm \
   -e DISABLE_BROWSER=false \
   -e PLAYWRIGHT_WS_URL=ws://browser:3000/ \
-  … ghcr.io/<owner>/linkwarden-slim:v2.15.1
+  … ghcr.io/<owner>/linkwarden-slim:vX.Y.Z
 ```
 
 ## CI / sync policy
 
 **One** workflow: [`.github/workflows/build-publish.yml`](./.github/workflows/build-publish.yml).
 
-| Trigger | Version source |
-|---------|----------------|
-| `schedule` every 6h (`0 */6 * * *`) | `releases/latest` → `tag_name` |
-| `workflow_dispatch` | input `version` (+ optional `force`) |
-| `push` to `main` (Dockerfile / entrypoint / workflow) | pin from `VERSION` |
+| Trigger | Behavior |
+|---------|----------|
+| Scheduled every 6h (`0 */6 * * *`) | Resolves and publishes the latest upstream release from the default `main` branch. |
+| Manual dispatch | Publishes the requested `vX.Y.Z`, or the current upstream release when empty. A historical release can receive any missing immutable registry copy, but cannot move `latest` when freshly resolved inputs differ. |
+| Push to `main` affecting packaging | Runs validation only. It never writes a registry tag. |
 
-**Source of truth for “already built”:** versioned tag on GHCR  
-`ghcr.io/<owner>/linkwarden-slim:vX.Y.Z`.  
-If it exists and `force` is false → skip. `VERSION` in git is only a pin (docs + path-push); commit of the pin after publish is best-effort.
+The publisher seals the default-branch packaging commit and the upstream tag's exact commit SHA before building. It resolves the Node, Rust, Postgres, and Meilisearch references to digests, then builds only from those pinned inputs.
 
-Build contract:
+### Base images
 
-```text
-checkout this repo
-checkout linkwarden/linkwarden @ <tag> → ./src
-cp docker-entrypoint.sh ./src/
-docker buildx build -f Dockerfile ./src
-```
+The Dockerfile tracks `node:lts-bookworm-slim` and `rust:1.96-bookworm`. The Node tag intentionally follows the current Node LTS line, so its major version can change. A newly resolved base digest does not move `latest` by itself: the candidate must pass all required gates first.
+
+Base inspection is anonymous and credential-free. A registry can still require a bearer-token exchange or apply anonymous rate limits. `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are used only for publishing; GHCR publishing uses `GITHUB_TOKEN` with `packages: write`.
+
+### Validation and promotion
+
+The CI fail-closed sequence is:
+
+1. Seal the `main` packaging SHA and upstream SHA; resolve digest-pinned bases and services.
+2. Build and run the upstream source test suite.
+3. Build and smoke-test the amd64 runtime.
+4. Push a GHCR-only staging image, then smoke-test its amd64 and arm64 runtime images.
+5. Verify the browser invariant on each runtime image: there is no Chromium, and a browser-enabled configuration without a remote Playwright endpoint must fail.
+6. Promote the verified artifact to GHCR, mirror it to Docker Hub, and only then consider `latest`.
+
+There is no local Chromium in the image. The source and runtime gates use the same digest-pinned Postgres and Meilisearch service images. If input resolution, build, or any required test fails before promotion, no version or `latest` release tag is published.
+
+`vX.Y.Z` tags are immutable. A base- or packaging-only update never overwrites an existing version tag; it may advance the guarded mutable `latest` tag after the candidate passes the gates and fresh inputs still match. `latest` is evaluated after immutable promotion, so an older manual version does not replace a newer valid `latest` when current inputs have changed.
+
+GHCR and Docker Hub do not support a cross-registry transaction. A failure during promotion can temporarily leave their immutable tags or `latest` tags out of sync. If a `latest` update reaches only one registry, that registry retains the new verified artifact while the other retains its existing `latest`; a later publish run reconciles missing immutable copies and retries the guarded `latest` update.
 
 ### Dockerfile sync-policy
 
-Our `Dockerfile` is a deliberate fork of the [upstream Dockerfile](https://github.com/linkwarden/linkwarden/blob/v2.15.1/Dockerfile) for the same tag:
+Our `Dockerfile` is a deliberate fork of the upstream Dockerfile for the selected `vX.Y.Z` tag:
 
 - Keep `monolith-builder` + `app-builder` (with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`) aligned with upstream.
 - **Omit** `playwright install` / `/ms-playwright` and Playwright apt deps in the runtime stage.
@@ -129,7 +141,7 @@ docker build -f Dockerfile -t linkwarden-slim:local ./src
 1. Create a GitHub repo and push this tree.
 2. Add secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
 3. Ensure `GITHUB_TOKEN` can write packages (`packages: write` is in the workflow).
-4. Run **Actions → build-publish → Run workflow** with `version=v2.15.1` (first publish).
+4. Run **Actions → build-publish → Run workflow** with `version=vX.Y.Z` (first publish).
 5. Confirm tags on GHCR and Docker Hub; compare Hub compressed size vs Docker Desktop uncompressed size.
 
 ## Disclaimer
