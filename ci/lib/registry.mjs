@@ -70,6 +70,31 @@ function parentDigestFromHead(stdout) {
   return stdout.match(/(?:^|\r?\n)\s*(?:Digest|Docker-Content-Digest):\s*(sha256:[a-f0-9]{64})\s*$/im)?.[1];
 }
 
+function normalizeTagReference(reference) {
+  if (typeof reference !== 'string' || reference.startsWith('-') || /\s|@/.test(reference)) {
+    throw new TypeError(`Invalid image tag reference: ${reference}`);
+  }
+  const segments = reference.split('/');
+  const name = segments.at(-1);
+  if (!name?.includes(':')) throw new TypeError(`Invalid image tag reference: ${reference}`);
+  if (segments.length === 1) return `docker.io/library/${reference}`;
+  if (!segments[0].includes('.') && !segments[0].includes(':') && segments[0] !== 'localhost') {
+    return `docker.io/${reference}`;
+  }
+  return reference;
+}
+
+function descriptorForPlatform(index, platform, reference) {
+  const [os, architecture] = platform.split('/');
+  const descriptor = index.manifests?.find((item) => item?.platform?.os === os
+    && item?.platform?.architecture === architecture
+    && item?.annotations?.['vnd.docker.reference.type'] !== 'attestation-manifest');
+  if (!descriptor || !DIGEST.test(descriptor.digest ?? '')) {
+    throw new TypeError(`Manifest for ${reference} does not contain ${platform}`);
+  }
+  return descriptor.digest;
+}
+
 function error(message) {
   return { kind: 'Error', message };
 }
@@ -108,6 +133,44 @@ function parseJson(stdout, description) {
   }
 }
 
+function requireRegistryResult(invocation, description) {
+  if (invocation.failure) {
+    throw new Error(`Unable to ${description}: ${resultText(invocation.failure) || 'regctl failed'}`);
+  }
+  return invocation.result.stdout;
+}
+
+/** Resolve one mutable image tag into its immutable index and requested platform manifests. */
+export async function resolveImageReference({ regctlPath, reference, platforms, env, run = defaultRun } = {}) {
+  if (typeof regctlPath !== 'string' || regctlPath.length === 0 || !Array.isArray(platforms) || platforms.length === 0) {
+    throw new TypeError('regctlPath, reference, and platforms are required');
+  }
+  const normalizedReference = normalizeTagReference(reference);
+  let parsed;
+  try {
+    parsed = parseDestinationReference(normalizedReference);
+  } catch {
+    throw new TypeError(`Invalid image tag reference: ${reference}`);
+  }
+  const head = await invoke(run, regctlPath, ['manifest', 'head', normalizedReference, '--require-digest'], env);
+  const parentDigest = parentDigestFromHead(requireRegistryResult(head, `resolve ${normalizedReference}`));
+  if (!parentDigest || !DIGEST.test(parentDigest)) {
+    throw new TypeError(`Malformed manifest head response for ${normalizedReference}`);
+  }
+  const sourceRef = formatSourceReference(parsed.repository, parentDigest);
+  const manifest = await invoke(run, regctlPath, ['manifest', 'get', sourceRef, '--format', 'raw-body'], env);
+  const index = parseJson(requireRegistryResult(manifest, `fetch ${sourceRef}`), 'manifest');
+  if (!Array.isArray(index.manifests)) throw new TypeError(`Malformed manifest response for ${sourceRef}`);
+  return {
+    sourceRef,
+    indexDigest: parentDigest,
+    platformRefs: Object.fromEntries(platforms.map((platform) => [
+      platform,
+      formatSourceReference(parsed.repository, descriptorForPlatform(index, platform, sourceRef)),
+    ])),
+  };
+}
+
 /**
  * Inspect a digest-qualified source without resolving any mutable tag.
  *
@@ -141,13 +204,13 @@ export async function inspectSourceReference({ regctlPath, sourceRef, env, run =
   }
   const configs = {};
   for (const platform of TARGET_PLATFORMS) {
-    const descriptor = descriptors.find((item) => item?.platform?.os === platform.split('/')[0]
-      && item?.platform?.architecture === platform.split('/')[1]
-      && item?.annotations?.['vnd.docker.reference.type'] !== 'attestation-manifest');
-    if (!descriptor || !DIGEST.test(descriptor.digest ?? '')) {
+    let digest;
+    try {
+      digest = descriptorForPlatform(index, platform, sourceRef);
+    } catch {
       continue;
     }
-    const platformRef = formatSourceReference(parsedSource.repository, descriptor.digest);
+    const platformRef = formatSourceReference(parsedSource.repository, digest);
     const inspected = await invoke(run, regctlPath, ['image', 'inspect', platformRef], env);
     if (inspected.failure) {
       return error(`Unable to inspect ${platform} manifest: ${resultText(inspected.failure) || 'regctl failed'}`);

@@ -82,31 +82,29 @@ async function materializeDependencies(input, run) {
   await mustRun('bash', ['ci/materialize-image.sh', 'linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest'], {}, run);
 }
 
-export async function validateInput(input, {
-  run = runCommand,
-  workspace,
-  context,
-  packagingExport,
-  digestPackaging,
-} = {}) {
-  const sealed = context && packagingExport ? undefined : await sealContext(input, { run, workspace, digestPackaging });
-  const sealedContext = context ?? sealed.context;
-  const sealedPackagingExport = packagingExport ?? sealed.packagingExport;
+export async function validateSealedContext(input, sealed, { run = runCommand } = {}) {
+  if (!sealed || typeof sealed.context !== 'string' || typeof sealed.packagingExport !== 'string') {
+    throw new TypeError('A sealed context and packaging export are required');
+  }
+  await materializeDependencies(input, run);
+  const sourceBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'source-test', tag: 'linkwarden-ci-source-test:latest' });
+  await mustRun(sourceBuild[0], sourceBuild.slice(1), {}, run);
+  await mustRun('bash', ['ci/test-stack.sh', 'source'], {
+    env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_SOURCE_TEST_IMAGE: 'linkwarden-ci-source-test:latest' },
+  }, run);
+  const appBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'main-app', tag: 'linkwarden-ci-app:latest' });
+  await mustRun(appBuild[0], appBuild.slice(1), {}, run);
+  await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
+    env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: 'linkwarden-ci-app:latest', CI_PLATFORM: 'linux/amd64' },
+  }, run);
+}
+
+async function validate(input, { run = runCommand, workspace, digestPackaging } = {}) {
+  const sealed = await sealContext(input, { run, workspace, digestPackaging });
   try {
-    await materializeDependencies(input, run);
-    const sourceBuild = buildDockerCommand({ input, context: sealedContext, packagingExport: sealedPackagingExport, target: 'source-test', tag: 'linkwarden-ci-source-test:latest' });
-    await mustRun(sourceBuild[0], sourceBuild.slice(1), {}, run);
-    await mustRun('bash', ['ci/test-stack.sh', 'source'], {
-      env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_SOURCE_TEST_IMAGE: 'linkwarden-ci-source-test:latest' },
-    }, run);
-    const appBuild = buildDockerCommand({ input, context: sealedContext, packagingExport: sealedPackagingExport, target: 'main-app', tag: 'linkwarden-ci-app:latest' });
-    await mustRun(appBuild[0], appBuild.slice(1), {}, run);
-    await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
-      env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: 'linkwarden-ci-app:latest', CI_PLATFORM: 'linux/amd64' },
-    }, run);
-    return sealedContext;
+    await validateSealedContext(input, sealed, { run });
   } finally {
-    if (sealed) await rm(sealed.root, { recursive: true, force: true });
+    await rm(sealed.root, { recursive: true, force: true });
   }
 }
 
@@ -187,11 +185,11 @@ async function requireCandidate({ regctlPath, reference, expected, run }) {
   return candidate;
 }
 
-async function refreshInputFromCommand({ freshCommand, run, workspace }) {
+async function refreshInputFromCommand({ freshCommand, freshArgs, run, workspace }) {
   const root = await mkdtemp(join(workspace ?? tmpdir(), 'linkwarden-fresh-'));
   const outputPath = join(root, 'input.json');
   try {
-    await mustRun('bash', [freshCommand, outputPath], {}, run);
+    await mustRun('bash', [freshCommand, '--out', outputPath, ...freshArgs], {}, run);
     return await readInput(outputPath);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -246,14 +244,20 @@ export async function publishInput(input, {
 
   let desiredArtifact;
   let promotionSource;
-  if (artifactMatchesRecipe(initialGhcrCandidate, recipe)) {
-    desiredArtifact = initialGhcrCandidate;
-    promotionSource = initialGhcrCandidate.sourceRef;
+  if (artifactMatchesRecipe(initialGhcrCandidate, recipe)
+    || artifactMatchesRecipe(canonicalVersion.artifact, recipe)) {
+    desiredArtifact = artifactMatchesRecipe(initialGhcrCandidate, recipe)
+      ? initialGhcrCandidate
+      : canonicalVersion.artifact;
+    promotionSource = desiredArtifact.sourceRef;
+    if (!compareArtifacts(initialGhcrCandidate, desiredArtifact)) {
+      await copyReference({ regctlPath, source: promotionSource, destination: ghcrCandidate, run: registryRun });
+    }
     await testArtifactRuntime(desiredArtifact, input, run);
   } else {
     const sealed = await sealContext(input, { run, workspace, digestPackaging });
     try {
-      await validateInput(input, { run, context: sealed.context, packagingExport: sealed.packagingExport });
+      await validateSealedContext(input, sealed, { run });
       const metadataFile = join(sealed.root, 'metadata.json');
       const stagingBuild = buildxStagingCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, staging, metadataFile });
       await mustRun(stagingBuild[0], stagingBuild.slice(1), {}, run);
@@ -314,6 +318,17 @@ export function parsePublishOptions(args) {
   if (Boolean(options['--fresh-input']) === Boolean(options['--fresh-command'])) {
     throw new Error('Specify exactly one of --fresh-input or --fresh-command');
   }
+  if (options['--fresh-command']) {
+    try {
+      const freshArgs = JSON.parse(options['--fresh-args'] ?? '');
+      if (!Array.isArray(freshArgs) || !freshArgs.every((value) => typeof value === 'string' && value.length > 0)) throw new TypeError();
+      options['--fresh-args'] = freshArgs;
+    } catch {
+      throw new Error('--fresh-args must be a JSON array of command arguments');
+    }
+  } else if (options['--fresh-args'] !== undefined) {
+    throw new Error('--fresh-args requires --fresh-command');
+  }
   if (options['--result-out'] !== undefined && (!options['--result-out'].trim() || options['--result-out'].startsWith('--'))) {
     throw new Error('Invalid value for --result-out');
   }
@@ -328,7 +343,7 @@ export async function publishFromOptions(input, args, {
   const result = await publish(input, {
     regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerCandidate: options['--docker-candidate'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], freshInputPath: options['--fresh-input'],
     refreshInput: options['--fresh-command']
-      ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], run })
+      ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], freshArgs: options['--fresh-args'], run })
       : undefined,
   });
   if (options['--result-out']) {
@@ -344,10 +359,10 @@ export async function publishFromOptions(input, args, {
 async function main() {
   const [subcommand, inputPath, ...args] = process.argv.slice(2);
   if (!['validate', 'verify-dockerfile', 'publish'].includes(subcommand) || !inputPath) {
-    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH) [--result-out FILE]]');
+    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH --fresh-args JSON) [--result-out FILE]]');
   }
   const input = await readInput(inputPath);
-  if (subcommand === 'validate') await validateInput(input, { run: runCommand });
+  if (subcommand === 'validate') await validate(input, { run: runCommand });
   if (subcommand === 'verify-dockerfile') {
     const sealed = await sealContext(input, { run: runCommand });
     try {

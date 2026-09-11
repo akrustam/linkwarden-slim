@@ -19,6 +19,7 @@ import {
   copyReference,
   inspectReference,
   inspectSourceReference,
+  resolveImageReference,
 } from './registry.mjs';
 
 const hex = (character, length) => character.repeat(length);
@@ -393,4 +394,50 @@ test('caps injected registry command output before parsing it', async () => {
     assert.equal(inspected.kind, 'Error');
     assert.match(inspected.message, /output limit/);
   }
+});
+
+test('normalizes Docker Hub tag sources before resolving generic platform references', async () => {
+  const references = [
+    ['node:lts-bookworm-slim', 'docker.io/library/node:lts-bookworm-slim'],
+    ['postgres:16-alpine', 'docker.io/library/postgres:16-alpine'],
+    ['getmeili/meilisearch:v1.13.3', 'docker.io/getmeili/meilisearch:v1.13.3'],
+  ];
+
+  for (const [reference, normalized] of references) {
+    const calls = [];
+    const resolved = await resolveImageReference({
+      regctlPath: 'regctl',
+      reference,
+      platforms: ['linux/amd64'],
+      run: async (_command, args) => {
+        calls.push(args);
+        if (args[1] === 'head') return ok(`${parentDigest}\n`);
+        return ok(JSON.stringify(index()));
+      },
+    });
+
+    assert.deepEqual(resolved, {
+      sourceRef: `${normalized.split(':')[0]}@${parentDigest}`,
+      indexDigest: parentDigest,
+      platformRefs: { 'linux/amd64': `${normalized.split(':')[0]}@${amd64Digest}` },
+    });
+    assert.deepEqual(calls, [
+      ['manifest', 'head', normalized, '--require-digest'],
+      ['manifest', 'get', `${normalized.split(':')[0]}@${parentDigest}`, '--format', 'raw-body'],
+    ]);
+  }
+});
+
+test('rejects a source index missing a requested platform', async () => {
+  await assert.rejects(
+    resolveImageReference({
+      regctlPath: 'regctl',
+      reference: 'node:lts-bookworm-slim',
+      platforms: ['linux/amd64', 'linux/arm64'],
+      run: async (_command, args) => (args[1] === 'head'
+        ? ok(`${parentDigest}\n`)
+        : ok(JSON.stringify(index([targetDescriptors()[0]])))),
+    }),
+    /does not contain linux\/arm64/,
+  );
 });

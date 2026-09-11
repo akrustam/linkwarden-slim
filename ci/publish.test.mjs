@@ -11,7 +11,7 @@ import {
   publishFromOptions,
   publishInput,
   readInput,
-  validateInput,
+  validateSealedContext,
 } from './publish.mjs';
 import { createRecipe } from './lib/recipe.mjs';
 
@@ -88,30 +88,35 @@ test('staging build is multi-platform and disables generated artifacts', () => {
   assert.equal(command.includes('ghcr.io/example/app:staging'), true);
 });
 
-test('validation builds source and runtime targets with recipe args before stack gates', async () => {
+test('validation builds source and runtime targets from an explicit sealed context', async () => {
   const calls = [];
   const run = async (command, args, options) => {
     calls.push({ command, args, options });
     return { exitCode: 0, signal: null };
   };
 
-  await validateInput(input, { run, digestPackaging: async () => input.recipe.packagingInputsDigest });
+  const result = await validateSealedContext(input, {
+    context: '/tmp/sealed-context',
+    packagingExport: '/tmp/sealed-packaging',
+  }, { run });
+
+  assert.equal(result, undefined);
 
   const dockerCalls = calls.filter((call) => call.command === 'docker');
   assert.equal(dockerCalls.length, 2);
   assert.equal(dockerCalls.every((call) => call.args.includes(`NODE_IMAGE=${input.nodeImage}`)), true);
   assert.equal(dockerCalls.every((call) => call.args.includes('--file')), true);
+  assert.equal(dockerCalls.every((call) => call.args.includes('/tmp/sealed-packaging/Dockerfile')), true);
+  assert.equal(dockerCalls.every((call) => call.args.at(-1) === '/tmp/sealed-context'), true);
   const bashCalls = calls.filter((call) => call.command === 'bash');
   assert.deepEqual(bashCalls.map((call) => call.args[0]), [
-    'ci/materialize-packaging.sh',
-    'ci/prepare-context.sh',
     'ci/materialize-image.sh',
     'ci/materialize-image.sh',
     'ci/test-stack.sh',
     'ci/test-stack.sh',
   ]);
-  assert.deepEqual(bashCalls[2].args.slice(1), ['linux/amd64', input.postgresImage, 'linkwarden-ci-postgres:latest']);
-  assert.deepEqual(bashCalls[3].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
+  assert.deepEqual(bashCalls[0].args.slice(1), ['linux/amd64', input.postgresImage, 'linkwarden-ci-postgres:latest']);
+  assert.deepEqual(bashCalls[1].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
 });
 
 test('readInput rejects missing and mismatched validation fingerprints', async (t) => {
@@ -289,6 +294,53 @@ test('keeps matching immutable versions while the desired candidate updates late
   assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desired.parentDigest}`), true);
 });
 
+test('reuses the current full-recipe version artifact before rebuilding a missing candidate', async () => {
+  const canonical = testArtifact('4', ['c', 'd']);
+  const registry = registryFixture({
+    artifacts: [canonical],
+    tags: {
+      'ghcr.io/example/app:v2.10.1': canonical,
+      'docker.io/example/app:v2.10.1': canonical,
+    },
+  });
+  const commands = [];
+
+  await publishInput(input, publishOptions({
+    registryRun: registry.registryRun,
+    run: async (command, args) => {
+      commands.push([command, args]);
+      return { exitCode: 0, signal: null };
+    },
+  }));
+
+  assert.equal(commands.some(([command, args]) => command === 'docker' && args[0] === 'buildx'), false);
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:candidate',
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:latest',
+    'docker.io/example/app:latest',
+  ]);
+});
+
+test('does not recopy an already matching candidate when reusing the current full-recipe version', async () => {
+  const canonical = testArtifact('4', ['c', 'd']);
+  const registry = registryFixture({
+    artifacts: [canonical],
+    tags: {
+      'ghcr.io/example/app:candidate': canonical,
+      'ghcr.io/example/app:v2.10.1': canonical,
+      'docker.io/example/app:v2.10.1': canonical,
+    },
+  });
+
+  await publishInput(input, publishOptions({
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(registry.copies.some((args) => args[3] === 'ghcr.io/example/app:candidate'), false);
+});
+
 test('publishes a requested historical version when fresh inputs supersede latest', async () => {
   const desired = testArtifact('3', ['a', 'b']);
   const registry = registryFixture({
@@ -461,7 +513,7 @@ test('parses fresh command publishing options and rejects competing fresh input 
     '--docker-latest', 'docker.io/example/app:latest',
   ];
 
-  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-inputs.sh', '--result-out', 'publish-result.json']), {
+  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '["--latest-upstream"]', '--result-out', 'publish-result.json']), {
     '--regctl': 'regctl',
     '--staging': 'ghcr.io/example/app:staging',
     '--ghcr-candidate': 'ghcr.io/example/app:candidate',
@@ -470,7 +522,8 @@ test('parses fresh command publishing options and rejects competing fresh input 
     '--docker-candidate': 'docker.io/example/app:candidate',
     '--docker-version': 'docker.io/example/app:v2.10.1',
     '--docker-latest': 'docker.io/example/app:latest',
-    '--fresh-command': 'ci/resolve-inputs.sh',
+    '--fresh-command': 'ci/resolve-publish-input.sh',
+    '--fresh-args': ['--latest-upstream'],
     '--result-out': 'publish-result.json',
   });
   assert.throws(
@@ -485,6 +538,50 @@ test('parses fresh command publishing options and rejects competing fresh input 
     () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--fresh-command', 'ci/resolve-inputs.sh']),
     /exactly one.*fresh-input.*fresh-command/i,
   );
+  assert.throws(
+    () => parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh']),
+    /--fresh-args/i,
+  );
+  assert.throws(
+    () => parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '{}']),
+    /--fresh-args/i,
+  );
+});
+
+test('runs the configured fresh command with its output path and configured arguments', async () => {
+  const required = [
+    '--regctl', 'regctl',
+    '--staging', 'ghcr.io/example/app:staging',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+    '--docker-candidate', 'docker.io/example/app:candidate',
+    '--docker-version', 'docker.io/example/app:v2.10.1',
+    '--docker-latest', 'docker.io/example/app:latest',
+  ];
+  let publishOptions;
+
+  await publishFromOptions(input, [
+    ...required,
+    '--fresh-command', 'ci/resolve-publish-input.sh',
+    '--fresh-args', '["--latest-upstream","--packaging-main"]',
+  ], {
+    run: async (command, args) => {
+      assert.equal(command, 'bash');
+      assert.deepEqual(args.slice(0, 2), ['ci/resolve-publish-input.sh', '--out']);
+      assert.match(args[2], /linkwarden-fresh-.*\/input\.json$/);
+      assert.deepEqual(args.slice(3), ['--latest-upstream', '--packaging-main']);
+      await writeFile(args[2], JSON.stringify(input));
+      return { exitCode: 0, signal: null };
+    },
+    publish: async (_publishInput, options) => {
+      publishOptions = options;
+      await options.refreshInput();
+      return { latest: 'published' };
+    },
+  });
+
+  assert.equal(publishOptions.freshInputPath, undefined);
 });
 
 test('writes the publish result to the requested output file', async () => {

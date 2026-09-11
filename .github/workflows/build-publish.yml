@@ -72,53 +72,26 @@ jobs:
         run: |
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
-          if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'VERSION must be a release tag, got: %s\n' "$version" >&2
-            exit 1
-          fi
-
-          tag_refs="$(git ls-remote "$UPSTREAM_URL" "refs/tags/$version^{}" "refs/tags/$version")"
-          upstream_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v peeled="refs/tags/$version^{}" '$2 == peeled { print $1; exit }')"
-          if [ -z "$upstream_sha" ]; then
-            upstream_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v tag="refs/tags/$version" '$2 == tag { print $1; exit }')"
-          fi
-          if ! [[ "$upstream_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'Unable to resolve upstream tag to an exact SHA: %s\n' "$version" >&2
-            exit 1
-          fi
-
           packaging_url="https://github.com/${GITHUB_REPOSITORY}.git"
-          packaging_sha="$GITHUB_SHA"
-          if ! [[ "$packaging_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'GITHUB_SHA is not an exact lowercase SHA\n' >&2
-            exit 1
-          fi
-
           regctl_path="$RUNNER_TEMP/regctl"
           bash ci/download-regctl.sh "$regctl_path"
           docker_config="$(mktemp -d "$RUNNER_TEMP/linkwarden-docker-config.XXXXXX")"
-          packaging_dir=""
-          trap 'rm -rf "$docker_config" "$packaging_dir"' EXIT
+          trap 'rm -rf "$docker_config"' EXIT
           export DOCKER_CONFIG="$docker_config"
           REGCTL_PATH="$regctl_path" bash ci/registry-probe.sh
-
-          packaging_dir="$(mktemp -d "$RUNNER_TEMP/linkwarden-packaging.XXXXXX")"
-          bash ci/materialize-packaging.sh "$packaging_url" "$packaging_sha" "$packaging_dir"
           input_json="$RUNNER_TEMP/linkwarden-validation-input.json"
-          node ci/resolve-inputs.mjs \
+          bash ci/resolve-publish-input.sh \
+            --out "$input_json" \
             --regctl "$regctl_path" \
             --packaging-url "$packaging_url" \
-            --packaging-sha "$packaging_sha" \
-            --packaging-export "$packaging_dir/export" \
+            --packaging-sha "$GITHUB_SHA" \
             --upstream-tag "$version" \
             --upstream-url "$UPSTREAM_URL" \
-            --upstream-sha "$upstream_sha" \
             --postgres "$POSTGRES_REF" \
             --meili "$MEILI_REF" \
             --node "$NODE_REF" \
             --rust "$RUST_REF" \
-            --monolith-version "$MONOLITH_VERSION" \
-            --out "$input_json"
+            --monolith-version "$MONOLITH_VERSION"
           echo "input_json=$input_json" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -153,65 +126,43 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
-            version="$INPUT_VERSION"
-          else
-            version="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)"
-          fi
-          if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'Resolved version must be a release tag, got: %s\n' "$version" >&2
-            exit 1
-          fi
-
-          tag_refs="$(git ls-remote "$UPSTREAM_URL" "refs/tags/$version^{}" "refs/tags/$version")"
-          upstream_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v peeled="refs/tags/$version^{}" '$2 == peeled { print $1; exit }')"
-          if [ -z "$upstream_sha" ]; then
-            upstream_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v tag="refs/tags/$version" '$2 == tag { print $1; exit }')"
-          fi
-          if ! [[ "$upstream_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'Unable to resolve upstream tag to an exact SHA: %s\n' "$version" >&2
-            exit 1
-          fi
-
           packaging_url="https://github.com/${GITHUB_REPOSITORY}.git"
-          packaging_sha="$(git ls-remote "$packaging_url" refs/heads/main | awk -F '\t' '$2 == "refs/heads/main" { print $1; exit }')"
-          if ! [[ "$packaging_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'Unable to resolve the default packaging branch to an exact SHA\n' >&2
-            exit 1
-          fi
-
           regctl_path="$RUNNER_TEMP/regctl"
           bash ci/download-regctl.sh "$regctl_path"
           docker_config="$(mktemp -d "$RUNNER_TEMP/linkwarden-docker-config.XXXXXX")"
-          packaging_dir=""
-          trap 'rm -rf "$docker_config" "$packaging_dir"' EXIT
+          trap 'rm -rf "$docker_config"' EXIT
           export DOCKER_CONFIG="$docker_config"
           REGCTL_PATH="$regctl_path" bash ci/registry-probe.sh
-          packaging_dir="$(mktemp -d "$RUNNER_TEMP/linkwarden-packaging.XXXXXX")"
-          bash ci/materialize-packaging.sh "$packaging_url" "$packaging_sha" "$packaging_dir"
-
           input_json="$RUNNER_TEMP/linkwarden-publish-input.json"
-          node ci/resolve-inputs.mjs \
+          resolver_args=(--latest-upstream --packaging-main)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
+            resolver_args=(--upstream-tag "$INPUT_VERSION" --packaging-main)
+          fi
+          bash ci/resolve-publish-input.sh \
+            --out "$input_json" \
             --regctl "$regctl_path" \
             --packaging-url "$packaging_url" \
-            --packaging-sha "$packaging_sha" \
-            --packaging-export "$packaging_dir/export" \
-            --upstream-tag "$version" \
             --upstream-url "$UPSTREAM_URL" \
-            --upstream-sha "$upstream_sha" \
             --postgres "$POSTGRES_REF" \
             --meili "$MEILI_REF" \
             --node "$NODE_REF" \
             --rust "$RUST_REF" \
             --monolith-version "$MONOLITH_VERSION" \
-            --out "$input_json"
+            "${resolver_args[@]}"
 
           recipe_id="$(node -e 'process.stdout.write(require(process.argv[1]).recipe.recipeId)' "$input_json")"
+          version="$(node -e 'process.stdout.write(require(process.argv[1]).upstreamTag)' "$input_json")"
           owner_lc="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          fresh_args="$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' \
+            --latest-upstream --packaging-main --regctl "$regctl_path" \
+            --packaging-url "$packaging_url" --upstream-url "$UPSTREAM_URL" \
+            --postgres "$POSTGRES_REF" --meili "$MEILI_REF" --node "$NODE_REF" \
+            --rust "$RUST_REF" --monolith-version "$MONOLITH_VERSION")"
           {
             echo "INPUT_JSON=$input_json"
             echo "REGCTL_PATH=$regctl_path"
-            echo "FRESH_COMMAND=ci/resolve-fresh-input.sh"
+            echo "FRESH_COMMAND=ci/resolve-publish-input.sh"
+            echo "FRESH_ARGS=$fresh_args"
             echo "SELECTED_VERSION=$version"
             echo "RECIPE_ID=$recipe_id"
             echo "GHCR_BASE=ghcr.io/$owner_lc/$IMAGE_NAME"
@@ -245,14 +196,6 @@ jobs:
           set -euo pipefail
           docker_base="docker.io/${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
           result_path="$RUNNER_TEMP/publish-result.json"
-          export FRESH_REGCTL_PATH="$REGCTL_PATH"
-          export FRESH_PACKAGING_URL="$PACKAGING_URL"
-          export FRESH_UPSTREAM_URL="$UPSTREAM_URL"
-          export FRESH_POSTGRES_REF="$POSTGRES_REF"
-          export FRESH_MEILI_REF="$MEILI_REF"
-          export FRESH_NODE_REF="$NODE_REF"
-          export FRESH_RUST_REF="$RUST_REF"
-          export FRESH_MONOLITH_VERSION="$MONOLITH_VERSION"
           node ci/publish.mjs publish "$INPUT_JSON" \
             --regctl "$REGCTL_PATH" \
             --staging "${GHCR_BASE}:staging-${GITHUB_RUN_ID}" \
@@ -263,6 +206,7 @@ jobs:
             --docker-version "${docker_base}:${SELECTED_VERSION}" \
             --docker-latest "${docker_base}:latest" \
             --fresh-command "$FRESH_COMMAND" \
+            --fresh-args "$FRESH_ARGS" \
             --result-out "$RUNNER_TEMP/publish-result.json"
           node -e '
             const { appendFileSync, readFileSync } = require("node:fs");
