@@ -8,9 +8,12 @@ import test from 'node:test';
 import {
   buildDockerCommand,
   buildxStagingCommand,
-  parsePublishOptions,
-  publishFromOptions,
-  publishInput,
+  mirrorDockerFromOptions,
+  mirrorDockerInput,
+  parseMirrorDockerOptions,
+  parsePublishGhcrOptions,
+  publishGhcrFromOptions,
+  publishGhcrInput,
   readInput,
   validateSealedContext,
 } from './publish.mjs';
@@ -183,17 +186,29 @@ function testArtifact(parentCharacter, childCharacters, artifactRecipe = createR
   };
 }
 
-function registryFixture({ artifacts, tags = {} }) {
+function validatedArtifact(artifact, repository = 'ghcr.io/example/app') {
+  return {
+    kind: 'Valid',
+    recipeId: artifact.labels['io.linkwarden-slim.recipe-id'],
+    sourceRef: `${repository}@${artifact.parentDigest}`,
+    platformDigests: artifact.childDigests,
+    validatedLabels: artifact.labels,
+  };
+}
+
+function registryFixture({ artifacts, tags = {}, inspections = {} }) {
   const byParent = new Map(artifacts.map((current) => [current.parentDigest, current]));
   const byChild = new Map(artifacts.flatMap((current) => Object.entries(current.childDigests).map(([platform, digest]) => [digest, { platform, labels: current.labels }])));
   const currentTags = new Map(Object.entries(tags));
+  const inspectionSequences = new Map(Object.entries(inspections).map(([reference, sequence]) => [reference, [...sequence]]));
   const calls = [];
   const copies = [];
   const ok = (stdout) => ({ exitCode: 0, signal: null, stdout, stderr: '' });
   const registryRun = async (_command, args) => {
     calls.push(args);
     if (args[0] === 'manifest' && args[1] === 'head') {
-      const current = currentTags.get(args[2]);
+      const sequence = inspectionSequences.get(args[2]);
+      const current = sequence?.length > 0 ? sequence.shift() : currentTags.get(args[2]);
       return current ? ok(`${current.parentDigest}\n`) : { exitCode: 1, signal: null, stdout: '', stderr: 'MANIFEST_UNKNOWN: manifest unknown' };
     }
     if (args[0] === 'manifest' && args[1] === 'get') {
@@ -231,9 +246,6 @@ function publishOptions(overrides = {}) {
     ghcrCandidate: 'ghcr.io/example/app:candidate',
     ghcrVersion: 'ghcr.io/example/app:v2.10.1',
     ghcrLatest: 'ghcr.io/example/app:latest',
-    dockerCandidate: 'docker.io/example/app:candidate',
-    dockerVersion: 'docker.io/example/app:v2.10.1',
-    dockerLatest: 'docker.io/example/app:latest',
     freshInput: input,
     workspace: '/tmp',
     digestPackaging: async () => input.recipe.packagingInputsDigest,
@@ -241,7 +253,20 @@ function publishOptions(overrides = {}) {
   };
 }
 
-test('promotes only the metadata-derived staging source after a staging tag is retargeted', async () => {
+function mirrorOptions(result, overrides = {}) {
+  return {
+    regctlPath: 'regctl',
+    ghcrCandidate: 'ghcr.io/example/app:candidate',
+    ghcrVersion: 'ghcr.io/example/app:v2.10.1',
+    ghcrLatest: 'ghcr.io/example/app:latest',
+    dockerVersion: 'docker.io/example/app:v2.10.1',
+    dockerLatest: 'docker.io/example/app:latest',
+    result,
+    ...overrides,
+  };
+}
+
+test('GHCR staging promotion uses only the metadata-derived immutable source', async () => {
   const staged = testArtifact('3', ['a', 'b']);
   const retargeted = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
   const registry = registryFixture({ artifacts: [staged, retargeted], tags: { 'ghcr.io/example/app:run-123': retargeted } });
@@ -253,7 +278,7 @@ test('promotes only the metadata-derived staging source after a staging tag is r
     return { exitCode: 0, signal: null };
   };
 
-  await publishInput(mutableInput, publishOptions({
+  await publishGhcrInput(mutableInput, publishOptions({
     registryRun: registry.registryRun,
     run,
     readMetadata: async () => JSON.stringify({ 'containerimage.digest': staged.parentDigest }),
@@ -262,12 +287,75 @@ test('promotes only the metadata-derived staging source after a staging tag is r
   const stagedSource = `ghcr.io/example/app@${staged.parentDigest}`;
   assert.equal(registry.calls.some((args) => args[0] === 'manifest' && args[1] === 'head' && args[2] === 'ghcr.io/example/app:run-123'), false);
   assert.equal(registry.copies.every((args) => args[2] === stagedSource), true);
+  assert.equal(registry.copies.every((args) => args[3].startsWith('ghcr.io/')), true);
   assert.equal(commands.filter(([command]) => command === 'docker').every(([, args]) => !args.includes('/tmp/packaging/Dockerfile') && !args.includes('/changed-after-validation/Dockerfile')), true);
   assert.equal(commands.filter(([command, args]) => command === 'bash' && args[0] === 'ci/materialize-packaging.sh').length, 1);
   assert.equal(commands.filter(([command, args]) => command === 'bash' && args[0] === 'ci/prepare-context.sh').length, 1);
 });
 
-test('mirrors a valid GHCR version artifact to a missing Docker version without replacing it with the desired latest', async () => {
+test('GHCR phase has no Docker destination or candidate option', () => {
+  const ghcrRequired = [
+    '--regctl', 'regctl',
+    '--staging', 'ghcr.io/example/app:staging',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+  ];
+  const dockerRequired = [
+    '--regctl', 'regctl',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+    '--docker-version', 'docker.io/example/app:v2.10.1',
+    '--docker-latest', 'docker.io/example/app:latest',
+    '--result-in', 'ghcr-result.json',
+    '--result-out', 'publish-result.json',
+  ];
+
+  assert.throws(
+    () => parsePublishGhcrOptions([...ghcrRequired, '--docker-candidate', 'docker.io/example/app:candidate', '--fresh-input', 'fresh.json', '--result-out', 'result.json']),
+    /invalid publish-ghcr option/i,
+  );
+  assert.throws(
+    () => parseMirrorDockerOptions([...dockerRequired, '--docker-candidate', 'docker.io/example/app:candidate']),
+    /invalid mirror-docker option/i,
+  );
+});
+
+test('a GHCR version promotion occurs before any Docker Hub operation', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired], tags: { 'ghcr.io/example/app:candidate': desired } });
+
+  await publishGhcrInput(input, publishOptions({
+    freshInput: { ...input, recipe: recipeWithNodeDigest('f'), nodeImage: `docker.io/library/node@sha256:${hex('f', 64)}` },
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(registry.calls.some((args) => args.some((value) => value.includes('docker.io/example/app'))), false);
+  assert.deepEqual(registry.copies.map((args) => args[3]), ['ghcr.io/example/app:v2.10.1']);
+});
+
+test('reuses and tests a full-recipe GHCR candidate without rebuilding', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired], tags: { 'ghcr.io/example/app:candidate': desired } });
+  const commands = [];
+
+  await publishGhcrInput(input, publishOptions({
+    freshInput: { ...input, recipe: recipeWithNodeDigest('f'), nodeImage: `docker.io/library/node@sha256:${hex('f', 64)}` },
+    registryRun: registry.registryRun,
+    run: async (command, args) => {
+      commands.push([command, args]);
+      return { exitCode: 0, signal: null };
+    },
+  }));
+
+  assert.equal(commands.some(([command, args]) => command === 'docker' && args[0] === 'buildx'), false);
+  assert.equal(commands.filter(([command, args]) => command === 'bash' && args[0] === 'ci/test-stack.sh').length, 2);
+  assert.deepEqual(registry.copies.map((args) => args[3]), ['ghcr.io/example/app:v2.10.1']);
+});
+
+test('mirrors an existing GHCR version to a missing Docker version without replacing it with the desired candidate', async () => {
   const canonical = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
   const desiredCandidate = testArtifact('3', ['a', 'b']);
   const registry = registryFixture({
@@ -275,20 +363,43 @@ test('mirrors a valid GHCR version artifact to a missing Docker version without 
     tags: {
       'ghcr.io/example/app:v2.10.1': canonical,
       'ghcr.io/example/app:candidate': desiredCandidate,
+      'ghcr.io/example/app:latest': desiredCandidate,
     },
   });
   const run = async () => ({ exitCode: 0, signal: null });
 
-  await publishInput(input, publishOptions({ registryRun: registry.registryRun, run }));
+  const ghcrResult = await publishGhcrInput(input, publishOptions({ registryRun: registry.registryRun, run }));
+  await mirrorDockerInput(input, mirrorOptions(ghcrResult, { registryRun: registry.registryRun }));
 
   assert.deepEqual(registry.copies.find((args) => args[3] === 'docker.io/example/app:v2.10.1'), [
     'image', 'copy', `ghcr.io/example/app@${canonical.parentDigest}`, 'docker.io/example/app:v2.10.1',
   ]);
   assert.equal(registry.copies.some((args) => args[3] === 'ghcr.io/example/app:v2.10.1'), false);
-  assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desiredCandidate.parentDigest}`), true);
+  assert.equal(registry.copies.some((args) => args[3].includes(':candidate')), false);
 });
 
-test('fails before registry writes when GHCR and Docker version artifacts diverge', async () => {
+test('Docker cannot supply a missing GHCR version authority', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const resultArtifact = validatedArtifact(desired);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'docker.io/example/app:v2.10.1': desired },
+  });
+
+  await assert.rejects(
+    mirrorDockerInput(input, mirrorOptions({
+      latest: 'skipped-stale',
+      desiredArtifact: resultArtifact,
+      desiredSource: resultArtifact.sourceRef,
+      versionArtifact: resultArtifact,
+      versionSource: resultArtifact.sourceRef,
+    }, { registryRun: registry.registryRun })),
+    /GHCR version/i,
+  );
+  assert.deepEqual(registry.copies, []);
+});
+
+test('fails before registry writes when Docker version diverges from GHCR authority', async () => {
   const ghcrVersion = testArtifact('4', ['c', 'd']);
   const dockerVersion = testArtifact('5', ['e', 'f'], recipeWithNodeDigest('f'));
   const registry = registryFixture({
@@ -300,78 +411,19 @@ test('fails before registry writes when GHCR and Docker version artifacts diverg
   });
 
   await assert.rejects(
-    publishInput(input, publishOptions({ registryRun: registry.registryRun, run: async () => ({ exitCode: 0, signal: null }) })),
+    mirrorDockerInput(input, mirrorOptions({
+      latest: 'skipped-stale',
+      desiredArtifact: validatedArtifact(ghcrVersion),
+      desiredSource: validatedArtifact(ghcrVersion).sourceRef,
+      versionArtifact: validatedArtifact(ghcrVersion),
+      versionSource: validatedArtifact(ghcrVersion).sourceRef,
+    }, { registryRun: registry.registryRun })),
     /diverge|match/i,
   );
   assert.deepEqual(registry.copies, []);
 });
 
-test('keeps matching immutable versions while the desired candidate updates latest', async () => {
-  const canonical = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
-  const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({
-    artifacts: [canonical, desired],
-    tags: {
-      'ghcr.io/example/app:v2.10.1': canonical,
-      'docker.io/example/app:v2.10.1': canonical,
-      'ghcr.io/example/app:candidate': desired,
-    },
-  });
-
-  await publishInput(input, publishOptions({ registryRun: registry.registryRun, run: async () => ({ exitCode: 0, signal: null }) }));
-
-  assert.equal(registry.copies.some((args) => args[3].endsWith(':v2.10.1')), false);
-  assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desired.parentDigest}`), true);
-});
-
-test('reuses the current full-recipe version artifact before rebuilding a missing candidate', async () => {
-  const canonical = testArtifact('4', ['c', 'd']);
-  const registry = registryFixture({
-    artifacts: [canonical],
-    tags: {
-      'ghcr.io/example/app:v2.10.1': canonical,
-      'docker.io/example/app:v2.10.1': canonical,
-    },
-  });
-  const commands = [];
-
-  await publishInput(input, publishOptions({
-    registryRun: registry.registryRun,
-    run: async (command, args) => {
-      commands.push([command, args]);
-      return { exitCode: 0, signal: null };
-    },
-  }));
-
-  assert.equal(commands.some(([command, args]) => command === 'docker' && args[0] === 'buildx'), false);
-  assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'ghcr.io/example/app:candidate',
-    'docker.io/example/app:candidate',
-    'ghcr.io/example/app:latest',
-    'docker.io/example/app:latest',
-  ]);
-});
-
-test('does not recopy an already matching candidate when reusing the current full-recipe version', async () => {
-  const canonical = testArtifact('4', ['c', 'd']);
-  const registry = registryFixture({
-    artifacts: [canonical],
-    tags: {
-      'ghcr.io/example/app:candidate': canonical,
-      'ghcr.io/example/app:v2.10.1': canonical,
-      'docker.io/example/app:v2.10.1': canonical,
-    },
-  });
-
-  await publishInput(input, publishOptions({
-    registryRun: registry.registryRun,
-    run: async () => ({ exitCode: 0, signal: null }),
-  }));
-
-  assert.equal(registry.copies.some((args) => args[3] === 'ghcr.io/example/app:candidate'), false);
-});
-
-test('publishes a requested historical version when fresh inputs supersede latest', async () => {
+test('stale history mirrors immutable versions but leaves both latest tags unchanged', async () => {
   const desired = testArtifact('3', ['a', 'b']);
   const registry = registryFixture({
     artifacts: [desired],
@@ -384,196 +436,185 @@ test('publishes a requested historical version when fresh inputs supersede lates
     nodeImage: `docker.io/library/node@${freshRecipe.nodeIndexDigest}`,
   };
 
-  const result = await publishInput(input, publishOptions({
+  const result = await publishGhcrInput(input, publishOptions({
     freshInput,
     registryRun: registry.registryRun,
     run: async () => ({ exitCode: 0, signal: null }),
   }));
 
   assert.equal(result.latest, 'skipped-stale');
-  assert.equal(result.artifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
+  assert.equal(result.desiredArtifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
   assert.equal(result.versionArtifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
+  await mirrorDockerInput(input, mirrorOptions(result, { registryRun: registry.registryRun }));
   assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'docker.io/example/app:candidate',
     'ghcr.io/example/app:v2.10.1',
     'docker.io/example/app:v2.10.1',
   ]);
+  assert.equal(registry.copies.some((args) => args[3].endsWith(':latest')), false);
 });
 
-test('keeps immutable versions and skips latest when only the fresh Postgres child changes', async () => {
+test('a freshness error still mirrors the GHCR version but leaves Docker latest unchanged', async () => {
   const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({
-    artifacts: [desired],
-    tags: { 'ghcr.io/example/app:candidate': desired },
-  });
-  const freshInput = {
-    ...input,
-    postgresImage: `docker.io/library/postgres@sha256:${hex('a', 64)}`,
-    validationFingerprint: 'sha256:c5f826b2f39143909f286203d5fd42a1d786e54a822c0b57f42d9562f99a1eab',
-  };
+  const registry = registryFixture({ artifacts: [desired], tags: { 'ghcr.io/example/app:candidate': desired } });
 
-  const result = await publishInput(input, publishOptions({
-    freshInput,
-    registryRun: registry.registryRun,
-    run: async () => ({ exitCode: 0, signal: null }),
-  }));
-
-  assert.equal(result.latest, 'skipped-stale');
-  assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'docker.io/example/app:candidate',
-    'ghcr.io/example/app:v2.10.1',
-    'docker.io/example/app:v2.10.1',
-  ]);
-});
-
-test('keeps immutable versions and skips latest when only the fresh Meilisearch child changes', async () => {
-  const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({
-    artifacts: [desired],
-    tags: { 'ghcr.io/example/app:candidate': desired },
-  });
-  const freshInput = {
-    ...input,
-    meiliImage: `docker.io/getmeili/meilisearch@sha256:${hex('b', 64)}`,
-    validationFingerprint: 'sha256:de61531f164fc9d39c7f4b606286f1268ff8b64571481f4d63bc8786d7074513',
-  };
-
-  const result = await publishInput(input, publishOptions({
-    freshInput,
-    registryRun: registry.registryRun,
-    run: async () => ({ exitCode: 0, signal: null }),
-  }));
-
-  assert.equal(result.latest, 'skipped-stale');
-  assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'docker.io/example/app:candidate',
-    'ghcr.io/example/app:v2.10.1',
-    'docker.io/example/app:v2.10.1',
-  ]);
-});
-
-test('refreshes inputs after candidate and version promotion before updating latest', async () => {
-  const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({ artifacts: [desired] });
-  const order = [];
-
-  const result = await publishInput(input, publishOptions({
-    freshInput: undefined,
-    refreshInput: async () => {
-      order.push('refresh');
-      return { ...input };
-    },
-    registryRun: async (command, args) => {
-      if (args[0] === 'image' && args[1] === 'copy') order.push(`copy:${args[3]}`);
-      return registry.registryRun(command, args);
-    },
-    run: async (command, args) => {
-      if (command === 'docker' && args[0] === 'buildx') order.push('staging');
-      return { exitCode: 0, signal: null };
-    },
-    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
-  }));
-
-  assert.equal(result.latest, 'published');
-  assert.deepEqual(order, [
-    'staging',
-    'copy:ghcr.io/example/app:candidate',
-    'copy:docker.io/example/app:candidate',
-    'copy:ghcr.io/example/app:v2.10.1',
-    'copy:docker.io/example/app:v2.10.1',
-    'refresh',
-    'copy:ghcr.io/example/app:latest',
-    'copy:docker.io/example/app:latest',
-  ]);
-});
-
-test('keeps version promotion and skips latest when refreshed input is malformed', async () => {
-  const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({ artifacts: [desired] });
-
-  const result = await publishInput(input, publishOptions({
-    freshInput: undefined,
-    refreshInput: async () => ({ recipe: {} }),
-    registryRun: registry.registryRun,
-    run: async () => ({ exitCode: 0, signal: null }),
-    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
-  }));
-
-  assert.equal(result.latest, 'skipped-freshness-error');
-  assert.match(result.freshnessError, /invalid schemaVersion/i);
-  assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'ghcr.io/example/app:candidate',
-    'docker.io/example/app:candidate',
-    'ghcr.io/example/app:v2.10.1',
-    'docker.io/example/app:v2.10.1',
-  ]);
-});
-
-test('records a failed freshness refresh after version promotion', async () => {
-  const desired = testArtifact('3', ['a', 'b']);
-  const registry = registryFixture({ artifacts: [desired] });
-
-  const result = await publishInput(input, publishOptions({
+  const result = await publishGhcrInput(input, publishOptions({
     freshInput: undefined,
     refreshInput: async () => { throw new Error('fresh resolver failed'); },
     registryRun: registry.registryRun,
     run: async () => ({ exitCode: 0, signal: null }),
-    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
   }));
+  await mirrorDockerInput(input, mirrorOptions(result, { registryRun: registry.registryRun }));
 
   assert.equal(result.latest, 'skipped-freshness-error');
-  assert.equal(result.freshnessError, 'fresh resolver failed');
   assert.deepEqual(registry.copies.map((args) => args[3]), [
-    'ghcr.io/example/app:candidate',
-    'docker.io/example/app:candidate',
     'ghcr.io/example/app:v2.10.1',
     'docker.io/example/app:v2.10.1',
   ]);
+  assert.equal(registry.copies.some((args) => args[3].endsWith(':latest')), false);
 });
 
-test('parses fresh command publishing options and rejects competing fresh input modes', () => {
-  const required = [
+test('mirrors Docker latest only from a verified GHCR candidate after GHCR publishes latest', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired], tags: { 'ghcr.io/example/app:candidate': desired } });
+
+  const result = await publishGhcrInput(input, publishOptions({
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+  await mirrorDockerInput(input, mirrorOptions(result, { registryRun: registry.registryRun }));
+
+  const source = `ghcr.io/example/app@${desired.parentDigest}`;
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:v2.10.1',
+    'ghcr.io/example/app:latest',
+    'docker.io/example/app:v2.10.1',
+    'docker.io/example/app:latest',
+  ]);
+  assert.equal(registry.copies.find((args) => args[3] === 'docker.io/example/app:latest')[2], source);
+  assert.equal(registry.copies.some((args) => args[3].includes(':candidate')), false);
+});
+
+test('a matching immutable version created during the recheck is accepted without copying', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+    inspections: { 'ghcr.io/example/app:v2.10.1': [undefined, desired] },
+  });
+
+  const result = await publishGhcrInput(input, publishOptions({
+    freshInput: { ...input, recipe: recipeWithNodeDigest('f'), nodeImage: `docker.io/library/node@sha256:${hex('f', 64)}` },
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(result.latest, 'skipped-stale');
+  assert.equal(registry.copies.some((args) => args[3] === 'ghcr.io/example/app:v2.10.1'), false);
+});
+
+test('a differing immutable version created during the recheck fails without overwriting it', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const conflicting = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
+  const registry = registryFixture({
+    artifacts: [desired, conflicting],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+    inspections: { 'ghcr.io/example/app:v2.10.1': [undefined, conflicting] },
+  });
+
+  await assert.rejects(
+    publishGhcrInput(input, publishOptions({
+      freshInput: { ...input, recipe: recipeWithNodeDigest('f'), nodeImage: `docker.io/library/node@sha256:${hex('f', 64)}` },
+      registryRun: registry.registryRun,
+      run: async () => ({ exitCode: 0, signal: null }),
+    })),
+    /immutable|canonical|match/i,
+  );
+  assert.deepEqual(registry.copies, []);
+});
+
+test('a differing Docker version created during the recheck fails without overwriting it', async () => {
+  const canonical = testArtifact('3', ['a', 'b']);
+  const conflicting = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
+  const canonicalResult = validatedArtifact(canonical);
+  const registry = registryFixture({
+    artifacts: [canonical, conflicting],
+    tags: {
+      'ghcr.io/example/app:v2.10.1': canonical,
+      'ghcr.io/example/app:candidate': canonical,
+      'ghcr.io/example/app:latest': canonical,
+    },
+    inspections: { 'docker.io/example/app:v2.10.1': [undefined, conflicting] },
+  });
+
+  await assert.rejects(
+    mirrorDockerInput(input, mirrorOptions({
+      latest: 'skipped-stale',
+      desiredArtifact: canonicalResult,
+      desiredSource: canonicalResult.sourceRef,
+      versionArtifact: canonicalResult,
+      versionSource: canonicalResult.sourceRef,
+    }, { registryRun: registry.registryRun })),
+    /immutable|match/i,
+  );
+  assert.deepEqual(registry.copies, []);
+});
+
+test('parses fresh GHCR options and separate Docker mirror options', () => {
+  const ghcrRequired = [
     '--regctl', 'regctl',
     '--staging', 'ghcr.io/example/app:staging',
     '--ghcr-candidate', 'ghcr.io/example/app:candidate',
     '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
     '--ghcr-latest', 'ghcr.io/example/app:latest',
-    '--docker-candidate', 'docker.io/example/app:candidate',
-    '--docker-version', 'docker.io/example/app:v2.10.1',
-    '--docker-latest', 'docker.io/example/app:latest',
   ];
 
-  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '["--latest-upstream"]', '--result-out', 'publish-result.json']), {
+  assert.deepEqual(parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '["--latest-upstream"]', '--result-out', 'publish-result.json']), {
     '--regctl': 'regctl',
     '--staging': 'ghcr.io/example/app:staging',
     '--ghcr-candidate': 'ghcr.io/example/app:candidate',
     '--ghcr-version': 'ghcr.io/example/app:v2.10.1',
     '--ghcr-latest': 'ghcr.io/example/app:latest',
-    '--docker-candidate': 'docker.io/example/app:candidate',
-    '--docker-version': 'docker.io/example/app:v2.10.1',
-    '--docker-latest': 'docker.io/example/app:latest',
     '--fresh-command': 'ci/resolve-publish-input.sh',
     '--fresh-args': ['--latest-upstream'],
     '--result-out': 'publish-result.json',
   });
+  assert.deepEqual(parseMirrorDockerOptions([
+    '--regctl', 'regctl',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+    '--docker-version', 'docker.io/example/app:v2.10.1',
+    '--docker-latest', 'docker.io/example/app:latest',
+    '--result-in', 'ghcr-result.json',
+    '--result-out', 'publish-result.json',
+  ]), {
+    '--regctl': 'regctl',
+    '--ghcr-candidate': 'ghcr.io/example/app:candidate',
+    '--ghcr-version': 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest': 'ghcr.io/example/app:latest',
+    '--docker-version': 'docker.io/example/app:v2.10.1',
+    '--docker-latest': 'docker.io/example/app:latest',
+    '--result-in': 'ghcr-result.json',
+    '--result-out': 'publish-result.json',
+  });
   assert.throws(
-    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--result-out', '--fresh-command']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-input', 'fresh.json', '--result-out', '--fresh-command']),
     /invalid value for --result-out/i,
   );
   assert.throws(
-    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--result-out', '   ']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-input', 'fresh.json', '--result-out', '   ']),
     /invalid value for --result-out/i,
   );
   assert.throws(
-    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--fresh-command', 'ci/resolve-inputs.sh']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-input', 'fresh.json', '--fresh-command', 'ci/resolve-inputs.sh', '--result-out', 'result.json']),
     /exactly one.*fresh-input.*fresh-command/i,
   );
   assert.throws(
-    () => parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--result-out', 'result.json']),
     /--fresh-args/i,
   );
   assert.throws(
-    () => parsePublishOptions([...required, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '{}']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '{}', '--result-out', 'result.json']),
     /--fresh-args/i,
   );
 });
@@ -585,16 +626,14 @@ test('runs the configured fresh command with its output path and configured argu
     '--ghcr-candidate', 'ghcr.io/example/app:candidate',
     '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
     '--ghcr-latest', 'ghcr.io/example/app:latest',
-    '--docker-candidate', 'docker.io/example/app:candidate',
-    '--docker-version', 'docker.io/example/app:v2.10.1',
-    '--docker-latest', 'docker.io/example/app:latest',
   ];
-  let publishOptions;
+  let ghcrOptions;
 
-  await publishFromOptions(input, [
+  await publishGhcrFromOptions(input, [
     ...required,
     '--fresh-command', 'ci/resolve-publish-input.sh',
     '--fresh-args', '["--latest-upstream","--packaging-main"]',
+    '--result-out', '/dev/null',
   ], {
     run: async (command, args) => {
       assert.equal(command, 'bash');
@@ -605,16 +644,16 @@ test('runs the configured fresh command with its output path and configured argu
       return { exitCode: 0, signal: null };
     },
     publish: async (_publishInput, options) => {
-      publishOptions = options;
+      ghcrOptions = options;
       await options.refreshInput();
-      return { latest: 'published' };
+      return { latest: 'published', desiredArtifact: {}, versionArtifact: {} };
     },
   });
 
-  assert.equal(publishOptions.freshInputPath, undefined);
+  assert.equal(ghcrOptions.freshInputPath, undefined);
 });
 
-test('writes the publish result to the requested output file', async () => {
+test('writes and reads two-phase publish results', async () => {
   const resultDirectory = await mkdtemp(join(tmpdir(), 'linkwarden-publish-result-'));
   const resultPath = join(resultDirectory, 'result.json');
   const required = [
@@ -623,19 +662,18 @@ test('writes the publish result to the requested output file', async () => {
     '--ghcr-candidate', 'ghcr.io/example/app:candidate',
     '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
     '--ghcr-latest', 'ghcr.io/example/app:latest',
-    '--docker-candidate', 'docker.io/example/app:candidate',
-    '--docker-version', 'docker.io/example/app:v2.10.1',
-    '--docker-latest', 'docker.io/example/app:latest',
   ];
   const expected = {
     latest: 'skipped-freshness-error',
     freshnessError: 'freshness resolver unavailable',
-    artifact: { sourceRef: 'ghcr.io/example/app@sha256:artifact' },
-    versionArtifact: { sourceRef: 'ghcr.io/example/app@sha256:version' },
+    desiredArtifact: validatedArtifact(testArtifact('3', ['a', 'b'])),
+    desiredSource: `ghcr.io/example/app@sha256:${hex('3', 64)}`,
+    versionArtifact: validatedArtifact(testArtifact('4', ['c', 'd'])),
+    versionSource: `ghcr.io/example/app@sha256:${hex('4', 64)}`,
     unexpected: 'must not be written',
   };
   try {
-    await publishFromOptions(input, [...required, '--fresh-input', 'fresh.json', '--result-out', resultPath], {
+    await publishGhcrFromOptions(input, [...required, '--fresh-input', 'fresh.json', '--result-out', resultPath], {
       publish: async (_publishInput, options) => {
         assert.equal(options.freshInputPath, 'fresh.json');
         return expected;
@@ -643,33 +681,31 @@ test('writes the publish result to the requested output file', async () => {
     });
 
     assert.deepEqual(JSON.parse(await readFile(resultPath, 'utf8')), {
-      latest: expected.latest,
-      freshnessError: expected.freshnessError,
-      artifact: expected.artifact,
-      versionArtifact: expected.versionArtifact,
+        latest: expected.latest,
+        freshnessError: expected.freshnessError,
+        desiredArtifact: expected.desiredArtifact,
+        desiredSource: expected.desiredSource,
+        versionArtifact: expected.versionArtifact,
+        versionSource: expected.versionSource,
+      });
+    let mirrorOptionsPassed;
+    await mirrorDockerFromOptions(input, [
+      '--regctl', 'regctl',
+      '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+      '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+      '--ghcr-latest', 'ghcr.io/example/app:latest',
+      '--docker-version', 'docker.io/example/app:v2.10.1',
+      '--docker-latest', 'docker.io/example/app:latest',
+      '--result-in', resultPath,
+      '--result-out', resultPath,
+    ], {
+      mirror: async (_mirrorInput, options) => {
+        mirrorOptionsPassed = options;
+        return { ...options.result, mirrored: true };
+      },
     });
+    assert.equal(mirrorOptionsPassed.result.desiredSource, expected.desiredSource);
   } finally {
     await rm(resultDirectory, { recursive: true, force: true });
   }
-});
-
-test('rejects a reused candidate that matches only the recipe id but not its complete recipe labels', async () => {
-  const candidate = testArtifact('3', ['a', 'b']);
-  candidate.labels['io.linkwarden-slim.node-base'] = `sha256:${hex('f', 64)}`;
-  const registry = registryFixture({ artifacts: [candidate], tags: { 'ghcr.io/example/app:candidate': candidate } });
-  const commands = [];
-
-  await assert.rejects(
-    publishInput(input, publishOptions({
-      registryRun: registry.registryRun,
-      run: async (command, args) => {
-        commands.push([command, args]);
-        return { exitCode: 0, signal: null };
-      },
-      readMetadata: async () => JSON.stringify({ 'containerimage.digest': candidate.parentDigest }),
-    })),
-    /recipe id|resolved recipe/i,
-  );
-  assert.equal(commands.some(([command]) => command === 'docker'), false);
-  assert.deepEqual(registry.copies, []);
 });

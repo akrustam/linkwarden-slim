@@ -178,32 +178,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate, stage, and publish GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node ci/publish.mjs publish-ghcr "$INPUT_JSON" \
+            --regctl "$REGCTL_PATH" \
+            --staging "${GHCR_BASE}:staging-${GITHUB_RUN_ID}" \
+            --ghcr-candidate "${GHCR_BASE}:candidate-${RECIPE_ID}" \
+            --ghcr-version "${GHCR_BASE}:${SELECTED_VERSION}" \
+            --ghcr-latest "${GHCR_BASE}:latest" \
+            --fresh-command "$FRESH_COMMAND" \
+            --fresh-args "$FRESH_ARGS" \
+            --result-out "$RUNNER_TEMP/ghcr-publish-result.json"
+
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Validate, stage, and publish
+      - name: Mirror GHCR release to Docker Hub
         env:
-          GH_TOKEN: ${{ github.token }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           set -euo pipefail
           docker_base="docker.io/${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
           result_path="$RUNNER_TEMP/publish-result.json"
-          node ci/publish.mjs publish "$INPUT_JSON" \
+          node ci/publish.mjs mirror-docker "$INPUT_JSON" \
             --regctl "$REGCTL_PATH" \
-            --staging "${GHCR_BASE}:staging-${GITHUB_RUN_ID}" \
             --ghcr-candidate "${GHCR_BASE}:candidate-${RECIPE_ID}" \
             --ghcr-version "${GHCR_BASE}:${SELECTED_VERSION}" \
             --ghcr-latest "${GHCR_BASE}:latest" \
-            --docker-candidate "${docker_base}:candidate-${RECIPE_ID}" \
             --docker-version "${docker_base}:${SELECTED_VERSION}" \
             --docker-latest "${docker_base}:latest" \
-            --fresh-command "$FRESH_COMMAND" \
-            --fresh-args "$FRESH_ARGS" \
-            --result-out "$RUNNER_TEMP/publish-result.json"
+            --result-in "$RUNNER_TEMP/ghcr-publish-result.json" \
+            --result-out "$result_path"
           node -e '
             const { appendFileSync, readFileSync } = require("node:fs");
             const resultPath = process.argv[1];
@@ -218,7 +229,7 @@ jobs:
             } else if (result.latest === "skipped-stale") {
               summary = `## Version published; latest unchanged\n\n- Version \`${version}\` was published or reconciled.\n- The \`latest\` tags were not moved because fresher publish inputs were resolved.`;
             } else {
-              summary = `## Latest gate resolution failed\n\n- Version \`${version}\` may have been published before freshness resolution failed.\n- The \`latest\` tags were not moved; retry this run to resolve the gate.`;
+              summary = `## Latest gate resolution failed\n\n- Version \`${version}\` was published or reconciled to GHCR and mirrored to Docker Hub.\n- The \`latest\` tags were not moved; retry this run to resolve the gate.`;
             }
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
             appendFileSync(process.env.GITHUB_ENV, `LATEST_PUBLISHED=${result.latest === "published"}\n`);

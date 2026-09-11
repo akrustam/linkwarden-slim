@@ -60,8 +60,10 @@ require 'ci/download-regctl.sh'
 require 'ci/registry-probe.sh'
 require_count 'bash ci/resolve-publish-input.sh' 2
 require 'ci/publish.mjs validate'
-require 'ci/publish.mjs publish'
-require '--result-out "$RUNNER_TEMP/publish-result.json"'
+require 'ci/publish.mjs publish-ghcr'
+require 'ci/publish.mjs mirror-docker'
+require '--result-out "$RUNNER_TEMP/ghcr-publish-result.json"'
+require '--result-out "$result_path"'
 require 'LATEST_PUBLISHED=${result.latest === "published"}'
 require 'if [ "$LATEST_PUBLISHED" != true ]; then'
 require '## Latest moved'
@@ -114,6 +116,7 @@ forbid 'docker/build-push-action'
 forbid 'docker/metadata-action'
 forbid 'docker() { return 1; }'
 forbid 'Check if GHCR tag exists'
+forbid 'docker-candidate'
 
 publish_start="$(grep -n '^  publish:$' "$workflow" | cut -d: -f1)"
 test_ci_start="$(grep -n '^  test-ci:$' "$workflow" | cut -d: -f1)"
@@ -127,6 +130,8 @@ workflow_test_line="$(grep -n 'bash ci/workflow.test.sh' "$workflow" | cut -d: -
 resolve_line="$(grep -n 'name: Resolve publish inputs' "$workflow" | cut -d: -f1)"
 ghcr_login_line="$(grep -n 'name: Log in to GHCR' "$workflow" | cut -d: -f1)"
 hub_login_line="$(grep -n 'name: Log in to Docker Hub' "$workflow" | cut -d: -f1)"
+ghcr_publish_line="$(grep -n 'name: Validate, stage, and publish GHCR' "$workflow" | cut -d: -f1)"
+docker_mirror_line="$(grep -n 'name: Mirror GHCR release to Docker Hub' "$workflow" | cut -d: -f1)"
 
 [ -n "$publish_start" ] || fail "missing publisher job"
 [ -n "$test_ci_start" ] || fail "missing test-ci job"
@@ -139,6 +144,8 @@ hub_login_line="$(grep -n 'name: Log in to Docker Hub' "$workflow" | cut -d: -f1
 [ -n "$resolve_line" ] || fail "missing publish input resolution"
 [ -n "$ghcr_login_line" ] || fail "missing GHCR login"
 [ -n "$hub_login_line" ] || fail "missing Docker Hub login"
+[ -n "$ghcr_publish_line" ] || fail "missing GHCR publish phase"
+[ -n "$docker_mirror_line" ] || fail "missing Docker mirror phase"
 [ "$resolve_line" -gt "$publish_start" ] || fail "publish input resolution is outside publisher job"
 [ "$publish_checkout_line" -gt "$publish_start" ] || fail "publisher main checkout is outside publisher job"
 [ "$publish_checkout_line" -lt "$resolve_line" ] || fail "publisher main checkout occurs after input resolution"
@@ -149,6 +156,9 @@ hub_login_line="$(grep -n 'name: Log in to Docker Hub' "$workflow" | cut -d: -f1
 [ "$test_ci_workflow_test_line" -gt "$test_ci_start" ] || fail "test-ci workflow structural test is outside test-ci"
 [ "$ghcr_login_line" -gt "$resolve_line" ] || fail "GHCR login occurs before input resolution"
 [ "$hub_login_line" -gt "$resolve_line" ] || fail "Docker Hub login occurs before input resolution"
+[ "$ghcr_login_line" -lt "$ghcr_publish_line" ] || fail "GHCR login must precede the GHCR publish phase"
+[ "$ghcr_publish_line" -lt "$hub_login_line" ] || fail "Docker Hub login must follow the GHCR publish phase"
+[ "$hub_login_line" -lt "$docker_mirror_line" ] || fail "Docker Hub login must precede Docker mirroring"
 
 if grep -A60 '^  test-ci:$' "$workflow" | grep -Eq 'docker/login-action|packages: write|contents: write'; then
   fail "test-ci job must not log in to a registry or have write permissions"

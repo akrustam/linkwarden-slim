@@ -129,25 +129,6 @@ function requireSafeInspection(artifact, reference) {
   }
 }
 
-function selectCanonicalVersion({ ghcrVersion, dockerVersion, recipe }) {
-  requireSafeInspection(ghcrVersion, 'GHCR version');
-  requireSafeInspection(dockerVersion, 'Docker version');
-  if (ghcrVersion.kind === 'Valid' && dockerVersion.kind === 'Valid') {
-    if (!compareArtifacts(ghcrVersion, dockerVersion)) throw new Error('GHCR and Docker version artifacts diverge');
-    if (!artifactMatchesUpstream(ghcrVersion, recipe)) throw new Error('Existing version artifact has a different upstream identity');
-    return { artifact: ghcrVersion, missing: [] };
-  }
-  if (ghcrVersion.kind === 'Valid') {
-    if (!artifactMatchesUpstream(ghcrVersion, recipe)) throw new Error('Existing GHCR version artifact has a different upstream identity');
-    return { artifact: ghcrVersion, missing: ['docker'] };
-  }
-  if (dockerVersion.kind === 'Valid') {
-    if (!artifactMatchesUpstream(dockerVersion, recipe)) throw new Error('Existing Docker version artifact has a different upstream identity');
-    return { artifact: dockerVersion, missing: ['ghcr'] };
-  }
-  return { artifact: undefined, missing: ['ghcr', 'docker'] };
-}
-
 async function testArtifactRuntime(artifact, input, run) {
   await materializeDependencies(input, run);
   for (const [platform, digest] of Object.entries(artifact.platformDigests)) {
@@ -170,11 +151,30 @@ function stagingSourceFromMetadata(staging, metadataText) {
   return formatSourceReference(parseDestinationReference(staging).repository, digest);
 }
 
+async function createImmutableArtifact({ regctlPath, source, destination, expected, run }) {
+  // Registries do not expose a portable conditional create, so reject a tag
+  // that appears during the final pre-copy check instead of replacing it.
+  const rechecked = await inspectReference({ regctlPath, reference: destination, run });
+  requireSafeInspection(rechecked, destination);
+  if (rechecked.kind === 'Valid') {
+    if (!compareArtifacts(expected, rechecked)) {
+      throw new Error(`${destination} differs from the expected immutable artifact`);
+    }
+    return rechecked;
+  }
+  await copyReference({ regctlPath, source, destination, run });
+  const copied = await inspectReference({ regctlPath, reference: destination, run });
+  if (!compareArtifacts(expected, copied)) {
+    throw new Error(`${destination} does not match the expected immutable artifact`);
+  }
+  return copied;
+}
+
 async function copyAndVerifyArtifact({ regctlPath, source, destination, expected, run }) {
   await copyReference({ regctlPath, source, destination, run });
   const copied = await inspectReference({ regctlPath, reference: destination, run });
   if (!compareArtifacts(expected, copied)) {
-    throw new Error(`${destination} does not match the canonical artifact`);
+    throw new Error(`${destination} does not match the expected artifact`);
   }
 }
 
@@ -199,22 +199,32 @@ async function refreshInputFromCommand({ freshCommand, freshArgs, run, workspace
 
 function freshnessErrorResult(artifact, versionArtifact, cause) {
   return {
-    artifact,
+    desiredArtifact: artifact,
+    desiredSource: artifact.sourceRef,
     versionArtifact,
+    versionSource: versionArtifact.sourceRef,
     latest: 'skipped-freshness-error',
     freshnessError: cause instanceof Error ? cause.message : String(cause),
   };
 }
 
-export async function publishInput(input, {
+function publishResult({ desiredArtifact, versionArtifact, latest, freshnessError }) {
+  return {
+    desiredArtifact,
+    desiredSource: desiredArtifact.sourceRef,
+    versionArtifact,
+    versionSource: versionArtifact.sourceRef,
+    latest,
+    ...(freshnessError === undefined ? {} : { freshnessError }),
+  };
+}
+
+export async function publishGhcrInput(input, {
   regctlPath,
   staging,
   ghcrCandidate,
   ghcrVersion,
   ghcrLatest,
-  dockerCandidate,
-  dockerVersion,
-  dockerLatest,
   freshInput,
   freshInputPath,
   refreshInput,
@@ -226,34 +236,21 @@ export async function publishInput(input, {
 } = {}) {
   validateInputShape(input);
   const recipe = input.recipe;
-  for (const reference of [staging, ghcrCandidate, ghcrVersion, ghcrLatest, dockerCandidate, dockerVersion, dockerLatest]) parseDestinationReference(reference);
-  const [initialGhcrCandidate, initialDockerCandidate, ghcrVersionArtifact, dockerVersionArtifact] = await Promise.all([
+  for (const reference of [staging, ghcrCandidate, ghcrVersion, ghcrLatest]) parseDestinationReference(reference);
+  const [initialGhcrCandidate, initialGhcrVersion] = await Promise.all([
     inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerCandidate, run: registryRun }),
     inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
   ]);
   for (const [artifact, reference] of [
-    [initialGhcrCandidate, ghcrCandidate], [initialDockerCandidate, dockerCandidate],
-    [ghcrVersionArtifact, ghcrVersion], [dockerVersionArtifact, dockerVersion],
+    [initialGhcrCandidate, ghcrCandidate], [initialGhcrVersion, ghcrVersion],
   ]) requireSafeInspection(artifact, reference);
-  const canonicalVersion = selectCanonicalVersion({
-    ghcrVersion: ghcrVersionArtifact,
-    dockerVersion: dockerVersionArtifact,
-    recipe,
-  });
+  if (initialGhcrVersion.kind === 'Valid' && !artifactMatchesUpstream(initialGhcrVersion, recipe)) {
+    throw new Error('Existing GHCR version artifact has a different upstream identity');
+  }
 
   let desiredArtifact;
-  let promotionSource;
-  if (artifactMatchesRecipe(initialGhcrCandidate, recipe)
-    || artifactMatchesRecipe(canonicalVersion.artifact, recipe)) {
-    desiredArtifact = artifactMatchesRecipe(initialGhcrCandidate, recipe)
-      ? initialGhcrCandidate
-      : canonicalVersion.artifact;
-    promotionSource = desiredArtifact.sourceRef;
-    if (!compareArtifacts(initialGhcrCandidate, desiredArtifact)) {
-      await copyReference({ regctlPath, source: promotionSource, destination: ghcrCandidate, run: registryRun });
-    }
+  if (artifactMatchesRecipe(initialGhcrCandidate, recipe)) {
+    desiredArtifact = initialGhcrCandidate;
     await testArtifactRuntime(desiredArtifact, input, run);
   } else {
     const sealed = await sealContext(input, { run, workspace, digestPackaging });
@@ -262,25 +259,25 @@ export async function publishInput(input, {
       const metadataFile = join(sealed.root, 'metadata.json');
       const stagingBuild = buildxStagingCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, staging, metadataFile });
       await mustRun(stagingBuild[0], stagingBuild.slice(1), {}, run);
-      promotionSource = stagingSourceFromMetadata(staging, await readMetadata(metadataFile));
-      desiredArtifact = await inspectSourceReference({ regctlPath, sourceRef: promotionSource, run: registryRun });
+      const stagingSource = stagingSourceFromMetadata(staging, await readMetadata(metadataFile));
+      desiredArtifact = await inspectSourceReference({ regctlPath, sourceRef: stagingSource, run: registryRun });
       if (!artifactMatchesRecipe(desiredArtifact, recipe)) throw new Error(desiredArtifact.message ?? 'Staging artifact does not match the resolved recipe');
       await testArtifactRuntime(desiredArtifact, input, run);
-      await copyReference({ regctlPath, source: promotionSource, destination: ghcrCandidate, run: registryRun });
+      await copyAndVerifyArtifact({ regctlPath, source: stagingSource, destination: ghcrCandidate, expected: desiredArtifact, run: registryRun });
     } finally {
       await rm(sealed.root, { recursive: true, force: true });
     }
   }
-  await requireCandidate({ regctlPath, reference: ghcrCandidate, expected: desiredArtifact, run: registryRun });
-  await copyReference({ regctlPath, source: promotionSource, destination: dockerCandidate, run: registryRun });
-  await requireCandidate({ regctlPath, reference: dockerCandidate, expected: desiredArtifact, run: registryRun });
-  const canonicalSource = canonicalVersion.artifact?.sourceRef ?? promotionSource;
-  const canonicalArtifact = canonicalVersion.artifact ?? desiredArtifact;
-  if (canonicalVersion.missing.includes('ghcr')) {
-    await copyAndVerifyArtifact({ regctlPath, source: canonicalSource, destination: ghcrVersion, expected: canonicalArtifact, run: registryRun });
-  }
-  if (canonicalVersion.missing.includes('docker')) {
-    await copyAndVerifyArtifact({ regctlPath, source: canonicalSource, destination: dockerVersion, expected: canonicalArtifact, run: registryRun });
+  desiredArtifact = await requireCandidate({ regctlPath, reference: ghcrCandidate, expected: desiredArtifact, run: registryRun });
+  let versionArtifact = initialGhcrVersion;
+  if (versionArtifact.kind === 'Missing') {
+    versionArtifact = await createImmutableArtifact({
+      regctlPath,
+      source: desiredArtifact.sourceRef,
+      destination: ghcrVersion,
+      expected: desiredArtifact,
+      run: registryRun,
+    });
   }
   let refreshed;
   try {
@@ -289,33 +286,47 @@ export async function publishInput(input, {
       : freshInput ?? (freshInputPath ? await readInput(freshInputPath) : undefined);
     validateInputShape(refreshed);
   } catch (cause) {
-    return freshnessErrorResult(desiredArtifact, canonicalArtifact, cause);
+    return freshnessErrorResult(desiredArtifact, versionArtifact, cause);
   }
   if (refreshed.recipe.recipeId !== recipe.recipeId
     || refreshed.validationFingerprint !== input.validationFingerprint) {
-    return { artifact: desiredArtifact, versionArtifact: canonicalArtifact, latest: 'skipped-stale' };
+    return publishResult({ desiredArtifact, versionArtifact, latest: 'skipped-stale' });
   }
-  const [ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
-    inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
-  ]);
+  const ghcrLatestArtifact = await inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun });
   requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
-  requireSafeInspection(dockerLatestArtifact, dockerLatest);
-  if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: ghcrLatest, run: registryRun });
-  if (!compareArtifacts(dockerLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: dockerLatest, run: registryRun });
-  return { artifact: desiredArtifact, versionArtifact: canonicalArtifact, latest: 'published' };
+  if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) {
+    await copyAndVerifyArtifact({ regctlPath, source: desiredArtifact.sourceRef, destination: ghcrLatest, expected: desiredArtifact, run: registryRun });
+  }
+  return publishResult({ desiredArtifact, versionArtifact, latest: 'published' });
 }
 
-export function parsePublishOptions(args) {
+function parseOptions(args, { allowed, required, name }) {
   if (args.length % 2 !== 0) throw new Error('Publish options require values');
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
-    if (!args[index].startsWith('--') || options[args[index]] !== undefined) throw new Error('Invalid publish options');
+    if (!args[index].startsWith('--') || !allowed.includes(args[index]) || options[args[index]] !== undefined) {
+      throw new Error(`Invalid ${name} option`);
+    }
     options[args[index]] = args[index + 1];
   }
-  for (const flag of ['--regctl', '--staging', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--docker-candidate', '--docker-version', '--docker-latest']) {
+  for (const flag of required) {
     if (!options[flag]) throw new Error(`Missing ${flag}`);
   }
+  return options;
+}
+
+function validateResultPath(options, flag) {
+  if (!options[flag]?.trim() || options[flag].startsWith('--')) {
+    throw new Error(`Invalid value for ${flag}`);
+  }
+}
+
+export function parsePublishGhcrOptions(args) {
+  const options = parseOptions(args, {
+    name: 'publish-ghcr',
+    allowed: ['--regctl', '--staging', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--fresh-input', '--fresh-command', '--fresh-args', '--result-out'],
+    required: ['--regctl', '--staging', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--result-out'],
+  });
   if (Boolean(options['--fresh-input']) === Boolean(options['--fresh-command'])) {
     throw new Error('Specify exactly one of --fresh-input or --fresh-command');
   }
@@ -330,43 +341,151 @@ export function parsePublishOptions(args) {
   } else if (options['--fresh-args'] !== undefined) {
     throw new Error('--fresh-args requires --fresh-command');
   }
-  if (options['--result-out'] !== undefined && (!options['--result-out'].trim() || options['--result-out'].startsWith('--'))) {
-    throw new Error('Invalid value for --result-out');
-  }
+  if (options['--result-out'] !== undefined) validateResultPath(options, '--result-out');
   return options;
 }
 
-export async function publishFromOptions(input, args, {
-  publish = publishInput,
+export function parseMirrorDockerOptions(args) {
+  const options = parseOptions(args, {
+    name: 'mirror-docker',
+    allowed: ['--regctl', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--docker-version', '--docker-latest', '--result-in', '--result-out'],
+    required: ['--regctl', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--docker-version', '--docker-latest', '--result-in', '--result-out'],
+  });
+  validateResultPath(options, '--result-in');
+  validateResultPath(options, '--result-out');
+  return options;
+}
+
+function requirePublishResult(result) {
+  if (!result || !['published', 'skipped-stale', 'skipped-freshness-error'].includes(result.latest)) {
+    throw new TypeError('Invalid GHCR publish result');
+  }
+  for (const key of ['desiredArtifact', 'versionArtifact']) {
+    if (result[key]?.kind !== 'Valid') throw new TypeError('Invalid GHCR publish result');
+  }
+  for (const key of ['desiredSource', 'versionSource']) {
+    try {
+      parseSourceReference(result[key]);
+    } catch {
+      throw new TypeError('Invalid GHCR publish result');
+    }
+  }
+  return result;
+}
+
+export async function mirrorDockerInput(input, {
+  regctlPath,
+  ghcrCandidate,
+  ghcrVersion,
+  ghcrLatest,
+  dockerVersion,
+  dockerLatest,
+  result,
+  registryRun,
+} = {}) {
+  validateInputShape(input);
+  requirePublishResult(result);
+  for (const reference of [ghcrCandidate, ghcrVersion, ghcrLatest, dockerVersion, dockerLatest]) parseDestinationReference(reference);
+  const [checkedGhcrVersion, checkedDockerVersion] = await Promise.all([
+    inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
+  ]);
+  requireSafeInspection(checkedGhcrVersion, ghcrVersion);
+  requireSafeInspection(checkedDockerVersion, dockerVersion);
+  if (checkedGhcrVersion.kind !== 'Valid' || !compareArtifacts(checkedGhcrVersion, result.versionArtifact)) {
+    throw new Error('GHCR version does not match the canonical version artifact');
+  }
+  let ghcrCandidateArtifact;
+  let ghcrLatestArtifact;
+  let dockerLatestArtifact;
+  if (result.latest === 'published') {
+    [ghcrCandidateArtifact, ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
+      inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
+      inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
+      inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
+    ]);
+    requireSafeInspection(ghcrCandidateArtifact, ghcrCandidate);
+    requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
+    requireSafeInspection(dockerLatestArtifact, dockerLatest);
+    if (!compareArtifacts(ghcrCandidateArtifact, result.desiredArtifact)
+      || !compareArtifacts(ghcrLatestArtifact, result.desiredArtifact)) {
+      throw new Error('GHCR latest does not match the verified candidate artifact');
+    }
+  }
+  if (checkedDockerVersion.kind === 'Valid' && !compareArtifacts(checkedDockerVersion, checkedGhcrVersion)) {
+    throw new Error('GHCR and Docker version artifacts diverge');
+  }
+  if (checkedDockerVersion.kind === 'Missing') {
+    await createImmutableArtifact({
+      regctlPath,
+      source: checkedGhcrVersion.sourceRef,
+      destination: dockerVersion,
+      expected: checkedGhcrVersion,
+      run: registryRun,
+    });
+  }
+  if (result.latest === 'published' && !compareArtifacts(dockerLatestArtifact, ghcrCandidateArtifact)) {
+    await copyAndVerifyArtifact({
+      regctlPath,
+      source: ghcrCandidateArtifact.sourceRef,
+      destination: dockerLatest,
+      expected: ghcrCandidateArtifact,
+      run: registryRun,
+    });
+  }
+  return result;
+}
+
+function serializablePublishResult(result) {
+  const output = {
+    latest: result.latest,
+    desiredArtifact: result.desiredArtifact,
+    desiredSource: result.desiredSource,
+    versionArtifact: result.versionArtifact,
+    versionSource: result.versionSource,
+  };
+  if (result.freshnessError !== undefined) output.freshnessError = result.freshnessError;
+  return output;
+}
+
+export async function publishGhcrFromOptions(input, args, {
+  publish = publishGhcrInput,
   run = runCommand,
 } = {}) {
-  const options = parsePublishOptions(args);
+  const options = parsePublishGhcrOptions(args);
   const result = await publish(input, {
-    regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerCandidate: options['--docker-candidate'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], freshInputPath: options['--fresh-input'],
+    regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], freshInputPath: options['--fresh-input'],
     refreshInput: options['--fresh-command']
       ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], freshArgs: options['--fresh-args'], run })
       : undefined,
   });
   if (options['--result-out']) {
-    const output = { latest: result.latest };
-    if (result.freshnessError !== undefined) output.freshnessError = result.freshnessError;
-    if (result.artifact !== undefined) output.artifact = result.artifact;
-    if (result.versionArtifact !== undefined) output.versionArtifact = result.versionArtifact;
-    await writeFile(resolve(options['--result-out']), `${JSON.stringify(output)}\n`);
+    await writeFile(resolve(options['--result-out']), `${JSON.stringify(serializablePublishResult(result))}\n`);
   }
   return result;
 }
 
+export async function mirrorDockerFromOptions(input, args, {
+  mirror = mirrorDockerInput,
+} = {}) {
+  const options = parseMirrorDockerOptions(args);
+  const result = requirePublishResult(JSON.parse(await readFile(resolve(options['--result-in']), 'utf8')));
+  const mirrored = await mirror(input, {
+    regctlPath: options['--regctl'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], result,
+  });
+  await writeFile(resolve(options['--result-out']), `${JSON.stringify(serializablePublishResult(mirrored))}\n`);
+  return mirrored;
+}
+
 async function main() {
   const [subcommand, inputPath, ...args] = process.argv.slice(2);
-  if (!['validate', 'publish'].includes(subcommand) || !inputPath) {
-    throw new Error('Usage: publish.mjs validate|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH --fresh-args JSON) [--result-out FILE]]');
+  if (!['validate', 'publish-ghcr', 'mirror-docker'].includes(subcommand) || !inputPath) {
+    throw new Error('Usage: publish.mjs validate|publish-ghcr|mirror-docker INPUT_JSON [OPTIONS]');
   }
   const input = await readInput(inputPath);
   if (subcommand === 'validate') await validate(input, { run: runCommand });
-  if (subcommand === 'publish') {
-    await publishFromOptions(input, args);
-  }
+  if (subcommand === 'publish-ghcr') await publishGhcrFromOptions(input, args);
+  if (subcommand === 'mirror-docker') await mirrorDockerFromOptions(input, args);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
