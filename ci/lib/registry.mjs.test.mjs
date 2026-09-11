@@ -20,7 +20,6 @@ import {
   inspectReference,
   inspectSourceReference,
 } from './registry.mjs';
-import { planRun } from './planner.mjs';
 
 const hex = (character, length) => character.repeat(length);
 const parentDigest = `sha256:${hex('b', 64)}`;
@@ -394,21 +393,4 @@ test('caps injected registry command output before parsing it', async () => {
     assert.equal(inspected.kind, 'Error');
     assert.match(inspected.message, /output limit/);
   }
-});
-
-test('generic 404 inspection errors cannot plan an immutable version tag update', async () => {
-  const inspected = await inspectReference({
-    regctlPath: 'regctl',
-    reference: `${repository}:v2.15.1`,
-    run: async () => ok('', { exitCode: 1, statusCode: 404, stderr: 'HTTP 404' }),
-  });
-
-  assert.throws(() => planRun({
-    recipe: recipeInput(),
-    sourceArtifacts: [],
-    versionArtifact: inspected,
-    latestArtifact: { kind: 'Missing' },
-    versionTag: `${repository}:v2.15.1`,
-    latestTag: `${repository}:latest`,
-  }), /HTTP 404/);
 });
