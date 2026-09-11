@@ -24,6 +24,20 @@ for path in "${required_exports[@]}"; do
   fi
 done
 
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+  if [ ! -d "$destination" ] || [ -L "$destination" ]; then
+    printf 'destination must be an empty directory: %s\n' "$destination" >&2
+    exit 1
+  fi
+  shopt -s nullglob dotglob
+  destination_entries=("$destination"/*)
+  shopt -u nullglob dotglob
+  if [ "${#destination_entries[@]}" -ne 0 ]; then
+    printf 'destination must be empty: %s\n' "$destination" >&2
+    exit 1
+  fi
+fi
+
 rm -rf "$destination"
 git init -q "$destination"
 git -C "$destination" remote add origin "$upstream_url"

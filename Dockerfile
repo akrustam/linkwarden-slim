@@ -1,5 +1,5 @@
-ARG NODE_IMAGE
-ARG RUST_IMAGE
+ARG NODE_IMAGE=node:lts-bookworm-slim
+ARG RUST_IMAGE=rust:1.96-bookworm
 ARG MONOLITH_VERSION=2.10.1
 
 FROM ${RUST_IMAGE} AS monolith-builder
@@ -16,7 +16,6 @@ RUN corepack enable
 
 COPY package.json yarn.lock .yarnrc.yml ./
 COPY mobile-package.json ./apps/mobile/package.json
-COPY apps/extension/package.json ./apps/extension/
 COPY apps/web/package.json ./apps/web/
 COPY apps/worker/package.json ./apps/worker/
 COPY packages/filesystem/package.json ./packages/filesystem/

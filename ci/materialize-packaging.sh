@@ -11,6 +11,25 @@ packaging_sha=$2
 destination=$3
 export_dir="$destination/export"
 
+if ! [[ "$packaging_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'PACKAGING_SHA must be a full lowercase Git SHA\n' >&2
+  exit 64
+fi
+
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+  if [ ! -d "$destination" ] || [ -L "$destination" ]; then
+    printf 'destination must be an empty directory: %s\n' "$destination" >&2
+    exit 1
+  fi
+  shopt -s nullglob dotglob
+  destination_entries=("$destination"/*)
+  shopt -u nullglob dotglob
+  if [ "${#destination_entries[@]}" -ne 0 ]; then
+    printf 'destination must be empty: %s\n' "$destination" >&2
+    exit 1
+  fi
+fi
+
 rm -rf "$destination"
 git init -q "$destination"
 git -C "$destination" remote add origin "$repository_url"

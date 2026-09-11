@@ -59,22 +59,27 @@ if PATH="$fake_bin:$PATH" REQUESTED_SHA="$first_sha" FETCHED_SHA="$second_sha" R
   fail 'materializer accepted a checkout that differs from the requested SHA'
 fi
 
-tag_out="$tmp/tag-output"
-"${BASH:-bash}" "$script" "$remote" v1.0.0 "$tag_out"
-[ "$(git -C "$tag_out" rev-parse HEAD)" = "$first_sha" ] || fail 'materializer did not resolve the requested tag commit'
+if "${BASH:-bash}" "$script" "$remote" v1.0.0 "$tmp/tag-output"; then
+  fail 'materializer accepted a mutable tag instead of a packaging SHA'
+fi
 
 out="$tmp/output"
-mkdir -p "$out/export"
-printf 'stale\n' > "$out/export/stale"
-"${BASH:-bash}" "$script" "$remote" "$first_sha" "$out"
+"${BASH:-bash}" "$script" "file://$remote" "$first_sha" "$out"
 
 [ "$(git -C "$out" rev-parse HEAD)" = "$first_sha" ] || fail 'materializer did not checkout the requested SHA'
 [ "$(<"$out/export/Dockerfile")" = 'FROM first' ] || fail 'materializer used stale or newer packaging bytes'
 [ "$(<"$out/export/docker-entrypoint.sh")" = 'first entrypoint' ] || fail 'materializer did not export the entrypoint'
 [ "$(<"$out/export/patch-next-standalone.js")" = 'first patch' ] || fail 'materializer did not export the standalone patch'
 [ "$(<"$out/export/ci/run-source-tests.sh")" = 'first source tests' ] || fail 'materializer did not export the source-test launcher'
-[ ! -e "$out/export/stale" ] || fail 'materializer retained stale export content'
 [ "$first_sha" != "$second_sha" ] || fail 'fixture must contain distinct commits'
+
+nonempty_out="$tmp/nonempty-output"
+mkdir -p "$nonempty_out"
+printf 'keep\n' > "$nonempty_out/sentinel"
+if "${BASH:-bash}" "$script" "file://$remote" "$first_sha" "$nonempty_out"; then
+  fail 'materializer removed a nonempty destination'
+fi
+[ "$(<"$nonempty_out/sentinel")" = keep ] || fail 'materializer changed a nonempty destination'
 
 git -C "$seed" rm -q ci/run-source-tests.sh
 git -C "$seed" commit -qm missing-launcher
@@ -87,14 +92,13 @@ fi
 
 dockerfile="$repo_root/Dockerfile"
 for required in \
-  'ARG NODE_IMAGE' \
-  'ARG RUST_IMAGE' \
+  'ARG NODE_IMAGE=node:lts-bookworm-slim' \
+  'ARG RUST_IMAGE=rust:1.96-bookworm' \
   'ARG MONOLITH_VERSION=2.10.1' \
   'FROM ${RUST_IMAGE} AS monolith-builder' \
   'cargo install --locked monolith@${MONOLITH_VERSION}' \
   'FROM ${NODE_IMAGE} AS source-deps' \
   'COPY mobile-package.json ./apps/mobile/package.json' \
-  'COPY apps/extension/package.json ./apps/extension/' \
   'yarn install --immutable' \
   'FROM source-deps AS source-test' \
   'CMD ["/usr/local/bin/run-source-tests.sh"]' \
@@ -111,8 +115,12 @@ for required in \
   grep -Fq "$required" "$dockerfile" || fail "Dockerfile is missing: $required"
 done
 
-if grep -Fq 'node:22' "$dockerfile" || grep -Fq 'rust:1.96' "$dockerfile"; then
-  fail 'Dockerfile retains a hard-coded base image reference'
+if grep -Fq 'COPY apps/extension/package.json ./apps/extension/' "$dockerfile"; then
+  fail 'Dockerfile requires an upstream apps/extension manifest'
+fi
+
+if grep -Fq 'node:22' "$dockerfile"; then
+  fail 'Dockerfile retains an obsolete Node base image reference'
 fi
 
 if ! grep -Fq 'p.scripts={...(p.scripts||{}),postinstall:"patch-package"}' "$dockerfile"; then

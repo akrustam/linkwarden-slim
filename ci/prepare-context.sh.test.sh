@@ -65,6 +65,14 @@ dest="$tmp/context"
 [ "$(<"$dest/run-source-tests.sh")" = 'packaging source tests' ] || fail 'prepare-context did not inject the source-test launcher'
 [ "$(<"$dest/mobile-package.json")" = '{"name":"@linkwarden/mobile"}' ] || fail 'prepare-context did not stage the ignored mobile workspace manifest'
 
+nonempty_dest="$tmp/nonempty-context"
+mkdir -p "$nonempty_dest"
+printf 'keep\n' > "$nonempty_dest/sentinel"
+if "${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$nonempty_dest"; then
+  fail 'prepare-context removed a nonempty destination'
+fi
+[ "$(<"$nonempty_dest/sentinel")" = keep ] || fail 'prepare-context changed a nonempty destination'
+
 printf 'stale entrypoint\n' > "$packaging_export/docker-entrypoint.sh"
 stale_dest="$tmp/stale-context"
 "${BASH:-bash}" "$script" "$upstream_remote" v1.0.0 "$packaging_export" "$stale_dest"
