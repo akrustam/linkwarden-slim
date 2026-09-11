@@ -52,9 +52,10 @@ if ! [[ "$latest_packaging_sha" =~ ^[a-f0-9]{40}$ ]]; then
 fi
 
 fresh_packaging_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/linkwarden-fresh-packaging.XXXXXX")"
-trap 'rm -rf "$fresh_packaging_dir"' EXIT
+fresh_docker_config="$(mktemp -d "${RUNNER_TEMP:-/tmp}/linkwarden-fresh-docker-config.XXXXXX")"
+trap 'rm -rf "$fresh_packaging_dir" "$fresh_docker_config"' EXIT
 bash "$script_dir/materialize-packaging.sh" "$packaging_url" "$latest_packaging_sha" "$fresh_packaging_dir"
-node "$script_dir/resolve-inputs.mjs" \
+DOCKER_CONFIG="$fresh_docker_config" node "$script_dir/resolve-inputs.mjs" \
   --regctl "$regctl_path" \
   --packaging-url "$packaging_url" \
   --packaging-sha "$latest_packaging_sha" \

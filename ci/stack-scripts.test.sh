@@ -35,6 +35,22 @@ done
 bash -n "$stack"
 bash -n "$smoke"
 
+browser_gate_line="$(grep -n '^check_no_local_browser_installs() {' "$smoke" | cut -d: -f1 || true)"
+browser_invariant_line="$(grep -n '^browser_check_output=' "$smoke" | cut -d: -f1 || true)"
+[ -n "$browser_gate_line" ] || fail 'runtime smoke does not define a local browser installation gate'
+[ -n "$browser_invariant_line" ] || fail 'runtime smoke does not retain the browser-enabled startup invariant'
+[ "$browser_gate_line" -lt "$browser_invariant_line" ] \
+  || fail 'runtime smoke checks browser startup before inspecting the image filesystem'
+if ! grep -A12 -F 'check_no_local_browser_installs() {' "$smoke" | grep -Fq -- '--entrypoint /bin/sh'; then
+  fail 'runtime smoke local browser gate does not execute inside the runtime image'
+fi
+if ! grep -A12 -F 'check_no_local_browser_installs() {' "$smoke" | grep -Fq -- 'for path in /ms-playwright'; then
+  fail 'runtime smoke local browser gate does not inspect Playwright browser directories'
+fi
+if ! grep -A12 -F 'check_no_local_browser_installs() {' "$smoke" | grep -Fq -- 'test ! -e "$path" || exit 1'; then
+  fail 'runtime smoke local browser gate does not reject discovered browser paths'
+fi
+
 expect_failure 'CI_POSTGRES_IMAGE is required' env -u CI_POSTGRES_IMAGE \
   CI_MEILI_IMAGE=getmeili/meilisearch:v1.12.8 \
   "${BASH:-bash}" "$stack" source
@@ -84,6 +100,15 @@ if [ "$1" = image ] && [ "$2" = inspect ] && [ "$5" = example.invalid/linkwarden
 fi
 if [ "$1" = run ]; then
   case " $* " in
+    *' --entrypoint /bin/sh '*)
+      case " $* " in
+        *' --platform linux/amd64 '*'-ec '*"for path in /ms-playwright"*) exit 0 ;;
+        *)
+          printf 'runtime browser filesystem check did not run in the requested image platform: %s\n' "$*" >&2
+          exit 1
+          ;;
+      esac
+      ;;
     *' --entrypoint '*)
       printf '%s\n' 'linkwarden-slim: no local Chromium' >&2
       exit 1

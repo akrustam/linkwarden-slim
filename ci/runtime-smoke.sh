@@ -102,6 +102,19 @@ if [ "$architecture" != "$expected_architecture" ]; then
   exit 1
 fi
 
+check_no_local_browser_installs() {
+  if ! docker run --rm --platform "$CI_PLATFORM" --entrypoint /bin/sh "$CI_IMAGE_REF" -ec '
+    for path in /ms-playwright "${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}" /root/.cache/ms-playwright /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome /usr/bin/google-chrome-stable; do
+      test ! -e "$path" || exit 1
+    done
+  '; then
+    printf 'runtime image contains a local browser installation\n' >&2
+    exit 1
+  fi
+}
+
+check_no_local_browser_installs
+
 browser_check_output=$(mktemp)
 trap 'rm -f "$browser_check_output"' EXIT
 if docker run --rm --platform "$CI_PLATFORM" \
