@@ -31,7 +31,7 @@ fi
 
 docker pull --platform "$platform" "$digest_source"
 
-image_metadata=$(docker image inspect --platform "$platform" --format '{{.Id}} {{.Architecture}}' "$digest_source")
+image_metadata=$(docker image inspect --format '{{.Id}} {{.Architecture}}' "$digest_source")
 IFS=' ' read -r image_id architecture extra <<< "$image_metadata"
 if [ -z "$image_id" ] || [ -n "${extra:-}" ] || [ "$architecture" != "$expected_architecture" ]; then
   printf 'pulled image architecture %s does not match %s\n' "$architecture" "$expected_architecture" >&2
