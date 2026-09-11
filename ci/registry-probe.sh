@@ -38,8 +38,8 @@ absent="docker.io/library/node:linkwarden-slim-probe-$(date +%s)-$$"
 if output=$("$REGCTL_PATH" manifest head "$absent" --require-digest 2>&1); then
   printf 'expected absent probe tag to be missing\n' >&2
   exit 1
-elif ! printf '%s' "$output" | grep -qi 'MANIFEST_UNKNOWN'; then
-  printf 'absent probe did not return MANIFEST_UNKNOWN: %.4000s\n' "$output" >&2
+elif ! printf '%s' "$output" | grep -Eqi 'MANIFEST_UNKNOWN|request failed: not found \[http 404\]'; then
+  printf 'absent probe did not return a known absence response: %.4000s\n' "$output" >&2
   exit 1
 fi
 

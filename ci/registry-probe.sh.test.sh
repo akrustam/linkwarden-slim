@@ -18,7 +18,7 @@ if [ "\$1" = manifest ] && [ "\$2" = head ] && [[ "\$3" == invalid.invalid/* ]];
   exit 1
 fi
 if [ "\$1" = manifest ] && [ "\$2" = head ] && [[ "\$3" == *linkwarden-slim-probe-* ]]; then
-  printf 'MANIFEST_UNKNOWN: manifest unknown\n' >&2
+  printf '%s\\n' "\${ABSENT_MANIFEST_OUTPUT:?}" >&2
   exit 1
 fi
 if [ "\$1" = manifest ] && [ "\$2" = head ] && [ "\$3" = 'docker.io/library/node:lts-bookworm-slim' ]; then
@@ -34,5 +34,18 @@ exit 1
 EOF
 chmod +x "$fake_regctl"
 
-REGCTL_PATH="$fake_regctl" bash "$script_dir/registry-probe.sh"
+run_probe() {
+  ABSENT_MANIFEST_OUTPUT="$1" REGCTL_PATH="$fake_regctl" bash "$script_dir/registry-probe.sh"
+}
+
+run_probe 'MANIFEST_UNKNOWN: manifest unknown'
+run_probe 'REQUEST FAILED: NOT FOUND [HTTP 404]'
+
+for output in 'request failed: unauthorized [http 404]' 'unrelated error [http 404]'; do
+  if run_probe "$output" >/dev/null 2>&1; then
+    printf 'expected absent probe to reject: %s\n' "$output" >&2
+    exit 1
+  fi
+done
+
 grep -q '^manifest head invalid.invalid/' "$calls"
