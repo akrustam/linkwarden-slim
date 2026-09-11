@@ -183,6 +183,38 @@ async function requireCandidate({ regctlPath, reference, expected, run }) {
   return candidate;
 }
 
+class FreshInputCommandError extends Error {
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.cause = cause;
+  }
+}
+
+async function refreshInputFromCommand({ freshCommand, run, workspace }) {
+  const root = await mkdtemp(join(workspace ?? tmpdir(), 'linkwarden-fresh-'));
+  const outputPath = join(root, 'input.json');
+  let commandCompleted = false;
+  try {
+    await mustRun('bash', [freshCommand, outputPath], {}, run);
+    commandCompleted = true;
+    return await readInput(outputPath);
+  } catch (cause) {
+    if (!commandCompleted) throw new FreshInputCommandError(cause);
+    throw cause;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function freshnessErrorResult(artifact, versionArtifact, cause) {
+  return {
+    artifact,
+    versionArtifact,
+    latest: 'skipped-freshness-error',
+    freshnessError: cause instanceof Error ? cause.message : String(cause),
+  };
+}
+
 export async function publishInput(input, {
   regctlPath,
   staging,
@@ -194,6 +226,7 @@ export async function publishInput(input, {
   dockerLatest,
   freshInput,
   freshInputPath,
+  refreshInput,
   run = runCommand,
   registryRun,
   workspace,
@@ -203,18 +236,15 @@ export async function publishInput(input, {
   validateInputShape(input);
   const recipe = input.recipe;
   for (const reference of [staging, ghcrCandidate, ghcrVersion, ghcrLatest, dockerCandidate, dockerVersion, dockerLatest]) parseDestinationReference(reference);
-  const [initialGhcrCandidate, initialDockerCandidate, ghcrVersionArtifact, dockerVersionArtifact, ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
+  const [initialGhcrCandidate, initialDockerCandidate, ghcrVersionArtifact, dockerVersionArtifact] = await Promise.all([
     inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
     inspectReference({ regctlPath, reference: dockerCandidate, run: registryRun }),
     inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
     inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
-    inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
   ]);
   for (const [artifact, reference] of [
     [initialGhcrCandidate, ghcrCandidate], [initialDockerCandidate, dockerCandidate],
     [ghcrVersionArtifact, ghcrVersion], [dockerVersionArtifact, dockerVersion],
-    [ghcrLatestArtifact, ghcrLatest], [dockerLatestArtifact, dockerLatest],
   ]) requireSafeInspection(artifact, reference);
   const canonicalVersion = selectCanonicalVersion({
     ghcrVersion: ghcrVersionArtifact,
@@ -247,10 +277,6 @@ export async function publishInput(input, {
   await requireCandidate({ regctlPath, reference: ghcrCandidate, expected: desiredArtifact, run: registryRun });
   await copyReference({ regctlPath, source: promotionSource, destination: dockerCandidate, run: registryRun });
   await requireCandidate({ regctlPath, reference: dockerCandidate, expected: desiredArtifact, run: registryRun });
-  const refreshed = freshInput ?? (freshInputPath ? await readInput(freshInputPath) : undefined);
-  if (!refreshed || createRecipe(refreshed.recipe).recipeId !== createRecipe(input.recipe).recipeId) {
-    throw new Error('Resolved inputs changed before tagging');
-  }
   const canonicalSource = canonicalVersion.artifact?.sourceRef ?? promotionSource;
   const canonicalArtifact = canonicalVersion.artifact ?? desiredArtifact;
   if (canonicalVersion.missing.includes('ghcr')) {
@@ -259,15 +285,50 @@ export async function publishInput(input, {
   if (canonicalVersion.missing.includes('docker')) {
     await copyAndVerifyArtifact({ regctlPath, source: canonicalSource, destination: dockerVersion, expected: canonicalArtifact, run: registryRun });
   }
+  let refreshed;
+  try {
+    refreshed = refreshInput
+      ? await refreshInput()
+      : freshInput ?? (freshInputPath ? await readInput(freshInputPath) : undefined);
+    validateInputShape(refreshed);
+  } catch (cause) {
+    if (cause instanceof FreshInputCommandError) throw cause.cause;
+    return freshnessErrorResult(desiredArtifact, canonicalArtifact, cause);
+  }
+  if (refreshed.recipe.recipeId !== recipe.recipeId) {
+    return { artifact: desiredArtifact, versionArtifact: canonicalArtifact, latest: 'skipped-stale' };
+  }
+  const [ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
+    inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
+  ]);
+  requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
+  requireSafeInspection(dockerLatestArtifact, dockerLatest);
   if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: ghcrLatest, run: registryRun });
   if (!compareArtifacts(dockerLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: dockerLatest, run: registryRun });
-  return desiredArtifact;
+  return { artifact: desiredArtifact, versionArtifact: canonicalArtifact, latest: 'published' };
+}
+
+export function parsePublishOptions(args) {
+  if (args.length % 2 !== 0) throw new Error('Publish options require values');
+  const options = {};
+  for (let index = 0; index < args.length; index += 2) {
+    if (!args[index].startsWith('--') || options[args[index]] !== undefined) throw new Error('Invalid publish options');
+    options[args[index]] = args[index + 1];
+  }
+  for (const flag of ['--regctl', '--staging', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--docker-candidate', '--docker-version', '--docker-latest']) {
+    if (!options[flag]) throw new Error(`Missing ${flag}`);
+  }
+  if (Boolean(options['--fresh-input']) === Boolean(options['--fresh-command'])) {
+    throw new Error('Specify exactly one of --fresh-input or --fresh-command');
+  }
+  return options;
 }
 
 async function main() {
   const [subcommand, inputPath, ...args] = process.argv.slice(2);
   if (!['validate', 'verify-dockerfile', 'publish'].includes(subcommand) || !inputPath) {
-    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF --fresh-input INPUT_JSON]');
+    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH)]');
   }
   const input = await readInput(inputPath);
   if (subcommand === 'validate') await validateInput(input, { run: runCommand });
@@ -279,17 +340,12 @@ async function main() {
     } finally { await rm(sealed.root, { recursive: true, force: true }); }
   }
   if (subcommand === 'publish') {
-    if (args.length % 2 !== 0) throw new Error('Publish options require values');
-    const options = {};
-    for (let index = 0; index < args.length; index += 2) {
-      if (!args[index].startsWith('--') || options[args[index]] !== undefined) throw new Error('Invalid publish options');
-      options[args[index]] = args[index + 1];
-    }
-    for (const flag of ['--regctl', '--staging', '--ghcr-candidate', '--ghcr-version', '--ghcr-latest', '--docker-candidate', '--docker-version', '--docker-latest', '--fresh-input']) {
-      if (!options[flag]) throw new Error(`Missing ${flag}`);
-    }
+    const options = parsePublishOptions(args);
     await publishInput(input, {
       regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerCandidate: options['--docker-candidate'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], freshInputPath: options['--fresh-input'],
+      refreshInput: options['--fresh-command']
+        ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], run: runCommand })
+        : undefined,
     });
   }
 }

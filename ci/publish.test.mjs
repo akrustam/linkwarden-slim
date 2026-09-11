@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildDockerCommand,
   buildxStagingCommand,
+  parsePublishOptions,
   publishInput,
   validateInput,
 } from './publish.mjs';
@@ -267,6 +268,121 @@ test('keeps matching immutable versions while the desired candidate updates late
 
   assert.equal(registry.copies.some((args) => args[3].endsWith(':v2.10.1')), false);
   assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desired.parentDigest}`), true);
+});
+
+test('publishes a requested historical version when fresh inputs supersede latest', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [desired],
+    tags: { 'ghcr.io/example/app:candidate': desired },
+  });
+  const freshRecipe = recipeWithNodeDigest('f');
+  const freshInput = {
+    ...input,
+    recipe: freshRecipe,
+    nodeImage: `docker.io/library/node@${freshRecipe.nodeIndexDigest}`,
+  };
+
+  const result = await publishInput(input, publishOptions({
+    freshInput,
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+
+  assert.equal(result.latest, 'skipped-stale');
+  assert.equal(result.artifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
+  assert.equal(result.versionArtifact.sourceRef, `ghcr.io/example/app@${desired.parentDigest}`);
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:v2.10.1',
+    'docker.io/example/app:v2.10.1',
+  ]);
+});
+
+test('refreshes inputs after candidate and version promotion before updating latest', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired] });
+  const order = [];
+
+  const result = await publishInput(input, publishOptions({
+    freshInput: undefined,
+    refreshInput: async () => {
+      order.push('refresh');
+      return { ...input };
+    },
+    registryRun: async (command, args) => {
+      if (args[0] === 'image' && args[1] === 'copy') order.push(`copy:${args[3]}`);
+      return registry.registryRun(command, args);
+    },
+    run: async (command, args) => {
+      if (command === 'docker' && args[0] === 'buildx') order.push('staging');
+      return { exitCode: 0, signal: null };
+    },
+    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
+  }));
+
+  assert.equal(result.latest, 'published');
+  assert.deepEqual(order, [
+    'staging',
+    'copy:ghcr.io/example/app:candidate',
+    'copy:docker.io/example/app:candidate',
+    'copy:ghcr.io/example/app:v2.10.1',
+    'copy:docker.io/example/app:v2.10.1',
+    'refresh',
+    'copy:ghcr.io/example/app:latest',
+    'copy:docker.io/example/app:latest',
+  ]);
+});
+
+test('keeps version promotion and skips latest when refreshed input is malformed', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired] });
+
+  const result = await publishInput(input, publishOptions({
+    freshInput: undefined,
+    refreshInput: async () => ({ recipe: {} }),
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
+  }));
+
+  assert.equal(result.latest, 'skipped-freshness-error');
+  assert.match(result.freshnessError, /invalid schemaVersion/i);
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:candidate',
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:v2.10.1',
+    'docker.io/example/app:v2.10.1',
+  ]);
+});
+
+test('parses fresh command publishing options and rejects competing fresh input modes', () => {
+  const required = [
+    '--regctl', 'regctl',
+    '--staging', 'ghcr.io/example/app:staging',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+    '--docker-candidate', 'docker.io/example/app:candidate',
+    '--docker-version', 'docker.io/example/app:v2.10.1',
+    '--docker-latest', 'docker.io/example/app:latest',
+  ];
+
+  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-inputs.sh']), {
+    '--regctl': 'regctl',
+    '--staging': 'ghcr.io/example/app:staging',
+    '--ghcr-candidate': 'ghcr.io/example/app:candidate',
+    '--ghcr-version': 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest': 'ghcr.io/example/app:latest',
+    '--docker-candidate': 'docker.io/example/app:candidate',
+    '--docker-version': 'docker.io/example/app:v2.10.1',
+    '--docker-latest': 'docker.io/example/app:latest',
+    '--fresh-command': 'ci/resolve-inputs.sh',
+  });
+  assert.throws(
+    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--fresh-command', 'ci/resolve-inputs.sh']),
+    /exactly one.*fresh-input.*fresh-command/i,
+  );
 });
 
 test('rejects a reused candidate that matches only the recipe id but not its complete recipe labels', async () => {
