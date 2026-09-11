@@ -17,6 +17,12 @@ require() {
   grep -Fq -- "$1" "$workflow" || fail "missing $1"
 }
 
+require_count() {
+  local actual
+  actual="$(grep -Fc -- "$1" "$workflow")"
+  [ "$actual" -eq "$2" ] || fail "expected $2 occurrences of $1, found $actual"
+}
+
 forbid() {
   if grep -Fq -- "$1" "$workflow"; then
     fail "unexpected $1"
@@ -52,7 +58,9 @@ require 'export FRESH_POSTGRES_REF="$POSTGRES_REF"'
 require 'export FRESH_MEILI_REF="$MEILI_REF"'
 require 'export FRESH_NODE_REF="$NODE_REF"'
 require 'export FRESH_RUST_REF="$RUST_REF"'
-require 'export FRESH_MONOLITH_VERSION="${SELECTED_VERSION#v}"'
+require 'MONOLITH_VERSION: 2.10.1'
+require_count '--monolith-version "$MONOLITH_VERSION"' 2
+require 'export FRESH_MONOLITH_VERSION="$MONOLITH_VERSION"'
 require 'refs/heads/main'
 require 'refs/tags/$version^{}'
 require 'GITHUB_SHA'
@@ -73,6 +81,8 @@ require 'git push origin HEAD:main'
 forbid 'force:'
 forbid 'Reconcile and publish even when version tags already exist'
 forbid 'fresh_command='
+forbid '--monolith-version "${version#v}"'
+forbid 'FRESH_MONOLITH_VERSION="${SELECTED_VERSION#v}"'
 forbid 'cat >'
 forbid '<<'
 forbid 'docker/build-push-action'

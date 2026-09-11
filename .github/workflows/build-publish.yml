@@ -26,6 +26,7 @@ env:
   MEILI_REF: getmeili/meilisearch:v1.13.3
   NODE_REF: node:lts-bookworm-slim
   RUST_REF: rust:1.96-bookworm
+  MONOLITH_VERSION: 2.10.1
 
 jobs:
   validate-packaging:
@@ -90,7 +91,7 @@ jobs:
             --meili "$MEILI_REF" \
             --node "$NODE_REF" \
             --rust "$RUST_REF" \
-            --monolith-version "${version#v}" \
+            --monolith-version "$MONOLITH_VERSION" \
             --out "$input_json"
           echo "input_json=$input_json" >> "$GITHUB_OUTPUT"
 
@@ -175,7 +176,7 @@ jobs:
             --meili "$MEILI_REF" \
             --node "$NODE_REF" \
             --rust "$RUST_REF" \
-            --monolith-version "${version#v}" \
+            --monolith-version "$MONOLITH_VERSION" \
             --out "$input_json"
 
           recipe_id="$(node -e 'process.stdout.write(require(process.argv[1]).recipe.recipeId)' "$input_json")"
@@ -223,7 +224,7 @@ jobs:
           export FRESH_MEILI_REF="$MEILI_REF"
           export FRESH_NODE_REF="$NODE_REF"
           export FRESH_RUST_REF="$RUST_REF"
-          export FRESH_MONOLITH_VERSION="${SELECTED_VERSION#v}"
+          export FRESH_MONOLITH_VERSION="$MONOLITH_VERSION"
           node ci/publish.mjs publish "$INPUT_JSON" \
             --regctl "$REGCTL_PATH" \
             --staging "${GHCR_BASE}:staging-${GITHUB_RUN_ID}" \
