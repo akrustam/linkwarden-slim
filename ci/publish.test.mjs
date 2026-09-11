@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
   buildDockerCommand,
   buildxStagingCommand,
   parsePublishOptions,
+  publishFromOptions,
   publishInput,
   validateInput,
 } from './publish.mjs';
@@ -356,6 +360,28 @@ test('keeps version promotion and skips latest when refreshed input is malformed
   ]);
 });
 
+test('records a failed freshness refresh after version promotion', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({ artifacts: [desired] });
+
+  const result = await publishInput(input, publishOptions({
+    freshInput: undefined,
+    refreshInput: async () => { throw new Error('fresh resolver failed'); },
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+    readMetadata: async () => JSON.stringify({ 'containerimage.digest': desired.parentDigest }),
+  }));
+
+  assert.equal(result.latest, 'skipped-freshness-error');
+  assert.equal(result.freshnessError, 'fresh resolver failed');
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:candidate',
+    'docker.io/example/app:candidate',
+    'ghcr.io/example/app:v2.10.1',
+    'docker.io/example/app:v2.10.1',
+  ]);
+});
+
 test('parses fresh command publishing options and rejects competing fresh input modes', () => {
   const required = [
     '--regctl', 'regctl',
@@ -368,7 +394,7 @@ test('parses fresh command publishing options and rejects competing fresh input 
     '--docker-latest', 'docker.io/example/app:latest',
   ];
 
-  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-inputs.sh']), {
+  assert.deepEqual(parsePublishOptions([...required, '--fresh-command', 'ci/resolve-inputs.sh', '--result-out', 'publish-result.json']), {
     '--regctl': 'regctl',
     '--staging': 'ghcr.io/example/app:staging',
     '--ghcr-candidate': 'ghcr.io/example/app:candidate',
@@ -378,11 +404,59 @@ test('parses fresh command publishing options and rejects competing fresh input 
     '--docker-version': 'docker.io/example/app:v2.10.1',
     '--docker-latest': 'docker.io/example/app:latest',
     '--fresh-command': 'ci/resolve-inputs.sh',
+    '--result-out': 'publish-result.json',
   });
+  assert.throws(
+    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--result-out', '--fresh-command']),
+    /invalid value for --result-out/i,
+  );
+  assert.throws(
+    () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--result-out', '   ']),
+    /invalid value for --result-out/i,
+  );
   assert.throws(
     () => parsePublishOptions([...required, '--fresh-input', 'fresh.json', '--fresh-command', 'ci/resolve-inputs.sh']),
     /exactly one.*fresh-input.*fresh-command/i,
   );
+});
+
+test('writes the publish result to the requested output file', async () => {
+  const resultDirectory = await mkdtemp(join(tmpdir(), 'linkwarden-publish-result-'));
+  const resultPath = join(resultDirectory, 'result.json');
+  const required = [
+    '--regctl', 'regctl',
+    '--staging', 'ghcr.io/example/app:staging',
+    '--ghcr-candidate', 'ghcr.io/example/app:candidate',
+    '--ghcr-version', 'ghcr.io/example/app:v2.10.1',
+    '--ghcr-latest', 'ghcr.io/example/app:latest',
+    '--docker-candidate', 'docker.io/example/app:candidate',
+    '--docker-version', 'docker.io/example/app:v2.10.1',
+    '--docker-latest', 'docker.io/example/app:latest',
+  ];
+  const expected = {
+    latest: 'skipped-freshness-error',
+    freshnessError: 'freshness resolver unavailable',
+    artifact: { sourceRef: 'ghcr.io/example/app@sha256:artifact' },
+    versionArtifact: { sourceRef: 'ghcr.io/example/app@sha256:version' },
+    unexpected: 'must not be written',
+  };
+  try {
+    await publishFromOptions(input, [...required, '--fresh-input', 'fresh.json', '--result-out', resultPath], {
+      publish: async (_publishInput, options) => {
+        assert.equal(options.freshInputPath, 'fresh.json');
+        return expected;
+      },
+    });
+
+    assert.deepEqual(JSON.parse(await readFile(resultPath, 'utf8')), {
+      latest: expected.latest,
+      freshnessError: expected.freshnessError,
+      artifact: expected.artifact,
+      versionArtifact: expected.versionArtifact,
+    });
+  } finally {
+    await rm(resultDirectory, { recursive: true, force: true });
+  }
 });
 
 test('rejects a reused candidate that matches only the recipe id but not its complete recipe labels', async () => {

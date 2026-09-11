@@ -23,6 +23,14 @@ require_count() {
   [ "$actual" -eq "$2" ] || fail "expected $2 occurrences of $1, found $actual"
 }
 
+require_action_count() {
+  local action=$1
+  local expected=$2
+  local actual
+  actual="$(grep -Fc -- "uses: $action@" "$workflow")"
+  [ "$actual" -eq "$expected" ] || fail "expected $expected uses of $action, found $actual"
+}
+
 forbid() {
   if grep -Fq -- "$1" "$workflow"; then
     fail "unexpected $1"
@@ -33,8 +41,10 @@ require 'cron: "0 */6 * * *"'
 require 'workflow_dispatch:'
 require 'version:'
 require 'ci/**'
+require 'test-ci:'
 require 'validate-packaging:'
 require 'publish:'
+require_count 'needs: test-ci' 2
 require 'if: github.event_name == '\''push'\'''
 require 'if: github.event_name != '\''push'\'''
 require 'group: linkwarden-slim-publisher'
@@ -42,6 +52,10 @@ require 'cancel-in-progress: false'
 require 'contents: read'
 require 'contents: write'
 require 'packages: write'
+require 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+require 'docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130'
+require 'docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f'
+require 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9'
 require 'ci/download-regctl.sh'
 require 'ci/registry-probe.sh'
 require 'ci/materialize-packaging.sh'
@@ -49,6 +63,14 @@ require 'ci/resolve-inputs.mjs'
 require 'ci/resolve-fresh-input.sh'
 require 'ci/publish.mjs validate'
 require 'ci/publish.mjs publish'
+require '--result-out "$RUNNER_TEMP/publish-result.json"'
+require 'LATEST_PUBLISHED=${result.latest === "published"}'
+require 'if [ "$LATEST_PUBLISHED" != true ]; then'
+require '## Latest moved'
+require '## Version published; latest unchanged'
+require '## Latest gate resolution failed'
+require 'skipped-stale'
+require 'skipped-freshness-error'
 require '--fresh-command'
 require 'FRESH_COMMAND=ci/resolve-fresh-input.sh'
 require 'export FRESH_REGCTL_PATH="$REGCTL_PATH"'
@@ -68,17 +90,26 @@ require 'GITHUB_RUN_ID'
 require 'candidate-${RECIPE_ID}'
 require 'staging-${GITHUB_RUN_ID}'
 require 'tr '\''[:upper:]'\'' '\''[:lower:]'\'''
-require 'docker/setup-qemu-action@v3'
-require 'docker/setup-buildx-action@v3'
-require 'docker/login-action@v3'
 require 'getmeili/meilisearch:v1.13.3'
 require 'bash ci/workflow.test.sh'
+require 'node --test ci/*.test.mjs ci/lib/*.test.mjs'
+require 'docker() { return 1; }'
+require 'bash -c '\''docker() { return 1; }; export -f docker; bash "$1"'\'' -- "$test_script"'
 require 'ref: main'
 require 'fetch-depth: 0'
 require 'git fetch origin main'
 require 'git checkout -B main origin/main'
 require 'git push origin HEAD:main'
+require_action_count 'actions/checkout' 3
+require_action_count 'docker/setup-qemu-action' 2
+require_action_count 'docker/setup-buildx-action' 2
+require_action_count 'docker/login-action' 2
 forbid 'force:'
+forbid 'actions/checkout@v'
+forbid 'docker/setup-qemu-action@v'
+forbid 'docker/setup-buildx-action@v'
+forbid 'docker/login-action@v'
+forbid '## Published linkwarden-slim'
 forbid 'Reconcile and publish even when version tags already exist'
 forbid 'fresh_command='
 forbid '--monolith-version "${version#v}"'
@@ -90,14 +121,23 @@ forbid 'docker/metadata-action'
 forbid 'Check if GHCR tag exists'
 
 publish_start="$(grep -n '^  publish:$' "$workflow" | cut -d: -f1)"
+test_ci_start="$(grep -n '^  test-ci:$' "$workflow" | cut -d: -f1)"
+validate_start="$(grep -n '^  validate-packaging:$' "$workflow" | cut -d: -f1)"
+validate_needs_line="$(grep -n '^    needs: test-ci$' "$workflow" | cut -d: -f1 | awk 'NR == 1 { print }')"
+publish_needs_line="$(grep -n '^    needs: test-ci$' "$workflow" | cut -d: -f1 | awk 'NR == 2 { print }')"
 publish_checkout_line="$(grep -n 'ref: main' "$workflow" | cut -d: -f1)"
-validate_checkout_line="$(grep -n '^      - name: Checkout this repository' "$workflow" | cut -d: -f1 | awk 'NR == 1 { print }')"
-workflow_test_line="$(grep -n 'bash ci/workflow.test.sh' "$workflow" | cut -d: -f1)"
+validate_checkout_line="$(grep -n '^      - name: Checkout this repository' "$workflow" | cut -d: -f1 | awk 'NR == 2 { print }')"
+test_ci_workflow_test_line="$(grep -n 'bash ci/workflow.test.sh' "$workflow" | cut -d: -f1 | awk 'NR == 1 { print }')"
+workflow_test_line="$(grep -n 'bash ci/workflow.test.sh' "$workflow" | cut -d: -f1 | awk 'NR == 2 { print }')"
 resolve_line="$(grep -n 'name: Resolve publish inputs' "$workflow" | cut -d: -f1)"
 ghcr_login_line="$(grep -n 'name: Log in to GHCR' "$workflow" | cut -d: -f1)"
 hub_login_line="$(grep -n 'name: Log in to Docker Hub' "$workflow" | cut -d: -f1)"
 
 [ -n "$publish_start" ] || fail "missing publisher job"
+[ -n "$test_ci_start" ] || fail "missing test-ci job"
+[ -n "$validate_start" ] || fail "missing validation job"
+[ -n "$validate_needs_line" ] || fail "validation job does not need test-ci"
+[ -n "$publish_needs_line" ] || fail "publish job does not need test-ci"
 [ -n "$publish_checkout_line" ] || fail "publisher checkout does not target main"
 [ -n "$validate_checkout_line" ] || fail "missing validation checkout"
 [ -n "$workflow_test_line" ] || fail "missing workflow structural test gate"
@@ -107,12 +147,20 @@ hub_login_line="$(grep -n 'name: Log in to Docker Hub' "$workflow" | cut -d: -f1
 [ "$resolve_line" -gt "$publish_start" ] || fail "publish input resolution is outside publisher job"
 [ "$publish_checkout_line" -gt "$publish_start" ] || fail "publisher main checkout is outside publisher job"
 [ "$publish_checkout_line" -lt "$resolve_line" ] || fail "publisher main checkout occurs after input resolution"
+[ "$validate_needs_line" -gt "$validate_start" ] || fail "validation test-ci gate is outside validation job"
+[ "$validate_needs_line" -lt "$publish_start" ] || fail "validation test-ci gate is outside validation job"
+[ "$publish_needs_line" -gt "$publish_start" ] || fail "publish test-ci gate is outside publish job"
 [ "$workflow_test_line" -gt "$validate_checkout_line" ] || fail "workflow structural test runs before checkout"
+[ "$test_ci_workflow_test_line" -gt "$test_ci_start" ] || fail "test-ci workflow structural test is outside test-ci"
 [ "$ghcr_login_line" -gt "$resolve_line" ] || fail "GHCR login occurs before input resolution"
 [ "$hub_login_line" -gt "$resolve_line" ] || fail "Docker Hub login occurs before input resolution"
 
-if grep -A140 '^  validate-packaging:$' "$workflow" | grep -Fq 'docker/login-action'; then
-  fail "validation job must not log in to a registry"
+if grep -A60 '^  test-ci:$' "$workflow" | grep -Eq 'docker/login-action|packages: write|contents: write'; then
+  fail "test-ci job must not log in to a registry or have write permissions"
+fi
+
+if ! grep -A60 '^  test-ci:$' "$workflow" | grep -Fq 'contents: read'; then
+  fail "test-ci job must have read-only contents permission"
 fi
 
 printf 'workflow structural tests passed\n'

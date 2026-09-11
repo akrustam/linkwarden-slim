@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -183,24 +183,12 @@ async function requireCandidate({ regctlPath, reference, expected, run }) {
   return candidate;
 }
 
-class FreshInputCommandError extends Error {
-  constructor(cause) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.cause = cause;
-  }
-}
-
 async function refreshInputFromCommand({ freshCommand, run, workspace }) {
   const root = await mkdtemp(join(workspace ?? tmpdir(), 'linkwarden-fresh-'));
   const outputPath = join(root, 'input.json');
-  let commandCompleted = false;
   try {
     await mustRun('bash', [freshCommand, outputPath], {}, run);
-    commandCompleted = true;
     return await readInput(outputPath);
-  } catch (cause) {
-    if (!commandCompleted) throw new FreshInputCommandError(cause);
-    throw cause;
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -292,7 +280,6 @@ export async function publishInput(input, {
       : freshInput ?? (freshInputPath ? await readInput(freshInputPath) : undefined);
     validateInputShape(refreshed);
   } catch (cause) {
-    if (cause instanceof FreshInputCommandError) throw cause.cause;
     return freshnessErrorResult(desiredArtifact, canonicalArtifact, cause);
   }
   if (refreshed.recipe.recipeId !== recipe.recipeId) {
@@ -322,13 +309,37 @@ export function parsePublishOptions(args) {
   if (Boolean(options['--fresh-input']) === Boolean(options['--fresh-command'])) {
     throw new Error('Specify exactly one of --fresh-input or --fresh-command');
   }
+  if (options['--result-out'] !== undefined && (!options['--result-out'].trim() || options['--result-out'].startsWith('--'))) {
+    throw new Error('Invalid value for --result-out');
+  }
   return options;
+}
+
+export async function publishFromOptions(input, args, {
+  publish = publishInput,
+  run = runCommand,
+} = {}) {
+  const options = parsePublishOptions(args);
+  const result = await publish(input, {
+    regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerCandidate: options['--docker-candidate'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], freshInputPath: options['--fresh-input'],
+    refreshInput: options['--fresh-command']
+      ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], run })
+      : undefined,
+  });
+  if (options['--result-out']) {
+    const output = { latest: result.latest };
+    if (result.freshnessError !== undefined) output.freshnessError = result.freshnessError;
+    if (result.artifact !== undefined) output.artifact = result.artifact;
+    if (result.versionArtifact !== undefined) output.versionArtifact = result.versionArtifact;
+    await writeFile(resolve(options['--result-out']), `${JSON.stringify(output)}\n`);
+  }
+  return result;
 }
 
 async function main() {
   const [subcommand, inputPath, ...args] = process.argv.slice(2);
   if (!['validate', 'verify-dockerfile', 'publish'].includes(subcommand) || !inputPath) {
-    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH)]');
+    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH) [--result-out FILE]]');
   }
   const input = await readInput(inputPath);
   if (subcommand === 'validate') await validateInput(input, { run: runCommand });
@@ -340,13 +351,7 @@ async function main() {
     } finally { await rm(sealed.root, { recursive: true, force: true }); }
   }
   if (subcommand === 'publish') {
-    const options = parsePublishOptions(args);
-    await publishInput(input, {
-      regctlPath: options['--regctl'], staging: options['--staging'], ghcrCandidate: options['--ghcr-candidate'], ghcrVersion: options['--ghcr-version'], ghcrLatest: options['--ghcr-latest'], dockerCandidate: options['--docker-candidate'], dockerVersion: options['--docker-version'], dockerLatest: options['--docker-latest'], freshInputPath: options['--fresh-input'],
-      refreshInput: options['--fresh-command']
-        ? () => refreshInputFromCommand({ freshCommand: options['--fresh-command'], run: runCommand })
-        : undefined,
-    });
+    await publishFromOptions(input, args);
   }
 }
 
