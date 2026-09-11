@@ -1,25 +1,27 @@
 #!/usr/bin/env node
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { buildArgPairs, buildArgsForRecipe } from './lib/build-args.mjs';
-import { copyReference, inspectReference } from './lib/registry.mjs';
-import { planRun } from './lib/planner.mjs';
-import { parseDestinationReference, parseSourceReference } from './lib/reference.mjs';
+import { compareArtifacts } from './lib/artifact.mjs';
+import { copyReference, inspectReference, inspectSourceReference } from './lib/registry.mjs';
+import { formatSourceReference, parseDestinationReference, parseSourceReference } from './lib/reference.mjs';
 import { createRecipe } from './lib/recipe.mjs';
+import { digestPackagingInputs } from './resolve-inputs.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
+const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
-export function buildDockerCommand({ input, context, target, tag }) {
+export function buildDockerCommand({ input, context, target, tag, packagingExport = input.packagingExport }) {
   const args = buildArgPairs(buildArgsForRecipe({ recipe: input.recipe, nodeImage: input.nodeImage, rustImage: input.rustImage }));
-  return ['docker', 'build', '--platform', 'linux/amd64', '--load', '--file', join(input.packagingExport, 'Dockerfile'), '--target', target, '--tag', tag, ...args, context];
+  return ['docker', 'build', '--platform', 'linux/amd64', '--load', '--file', join(packagingExport, 'Dockerfile'), '--target', target, '--tag', tag, ...args, context];
 }
 
-export function buildxStagingCommand({ input, context, staging, metadataFile }) {
+export function buildxStagingCommand({ input, context, staging, metadataFile, packagingExport = input.packagingExport }) {
   const args = buildArgPairs(buildArgsForRecipe({ recipe: input.recipe, nodeImage: input.nodeImage, rustImage: input.rustImage }));
-  return ['docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--push', '--file', join(input.packagingExport, 'Dockerfile'), '--provenance=false', '--sbom=false', '--metadata-file', metadataFile, '--tag', staging, ...args, context];
+  return ['docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--push', '--file', join(packagingExport, 'Dockerfile'), '--provenance=false', '--sbom=false', '--metadata-file', metadataFile, '--tag', staging, ...args, context];
 }
 
 export function runCommand(command, args, { env = process.env, cwd } = {}) {
@@ -35,16 +37,40 @@ async function mustRun(command, args, options, run) {
   if (result.exitCode !== 0 || result.signal !== null) throw new Error(`${command} failed`);
 }
 
-async function readInput(path) {
-  const input = JSON.parse(await readFile(resolve(path), 'utf8'));
+function validateInputShape(input) {
+  if (!input || typeof input !== 'object') throw new TypeError('Invalid publish input');
   input.recipe = createRecipe(input.recipe);
   for (const key of ['nodeImage', 'rustImage', 'postgresImage', 'meiliImage']) parseSourceReference(input[key]);
-  if (typeof input.packagingExport !== 'string' || !SHA.test(input.upstreamSha ?? '')) throw new TypeError('Invalid publish input');
+  if (typeof input.packagingUrl !== 'string' || input.packagingUrl.length === 0
+    || typeof input.upstreamUrl !== 'string' || input.upstreamUrl.length === 0
+    || !SHA.test(input.upstreamSha ?? '')) {
+    throw new TypeError('Invalid publish input');
+  }
   return input;
 }
 
-async function prepareContext(input, destination, run) {
-  await mustRun('bash', ['ci/prepare-context.sh', input.packagingUrl, input.upstreamSha, input.packagingExport, destination], {}, run);
+export async function readInput(path) {
+  return validateInputShape(JSON.parse(await readFile(resolve(path), 'utf8')));
+}
+
+async function sealContext(input, { run, workspace, digestPackaging = digestPackagingInputs } = {}) {
+  if (workspace !== undefined) await mkdir(workspace, { recursive: true });
+  const root = await mkdtemp(join(workspace ?? tmpdir(), 'linkwarden-publish-'));
+  const packagingDir = join(root, 'packaging');
+  const packagingExport = join(packagingDir, 'export');
+  const context = join(root, 'context');
+  try {
+    await mustRun('bash', ['ci/materialize-packaging.sh', input.packagingUrl, input.recipe.packagingSourceSha, packagingDir], {}, run);
+    const actualDigest = await digestPackaging(packagingExport);
+    if (actualDigest !== input.recipe.packagingInputsDigest) {
+      throw new Error('Materialized packaging inputs do not match the resolved recipe');
+    }
+    await mustRun('bash', ['ci/prepare-context.sh', input.upstreamUrl, input.upstreamSha, packagingExport, context], {}, run);
+    return { context, packagingExport, root };
+  } catch (cause) {
+    await rm(root, { recursive: true, force: true });
+    throw cause;
+  }
 }
 
 async function materializeDependencies(input, run) {
@@ -52,27 +78,109 @@ async function materializeDependencies(input, run) {
   await mustRun('bash', ['ci/materialize-image.sh', 'linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest'], {}, run);
 }
 
-export async function validateInput(input, { run = runCommand, workspace } = {}) {
-  const createdWorkspace = workspace === undefined;
-  const root = workspace ?? await mkdtemp(join(tmpdir(), 'linkwarden-publish-'));
+export async function validateInput(input, {
+  run = runCommand,
+  workspace,
+  context,
+  packagingExport,
+  digestPackaging,
+} = {}) {
+  const sealed = context && packagingExport ? undefined : await sealContext(input, { run, workspace, digestPackaging });
+  const sealedContext = context ?? sealed.context;
+  const sealedPackagingExport = packagingExport ?? sealed.packagingExport;
   try {
-    const context = join(root, 'context');
-    await prepareContext(input, context, run);
     await materializeDependencies(input, run);
-    const sourceBuild = buildDockerCommand({ input, context, target: 'source-test', tag: 'linkwarden-ci-source-test:latest' });
+    const sourceBuild = buildDockerCommand({ input, context: sealedContext, packagingExport: sealedPackagingExport, target: 'source-test', tag: 'linkwarden-ci-source-test:latest' });
     await mustRun(sourceBuild[0], sourceBuild.slice(1), {}, run);
     await mustRun('bash', ['ci/test-stack.sh', 'source'], {
       env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_SOURCE_TEST_IMAGE: 'linkwarden-ci-source-test:latest' },
     }, run);
-    const appBuild = buildDockerCommand({ input, context, target: 'main-app', tag: 'linkwarden-ci-app:latest' });
+    const appBuild = buildDockerCommand({ input, context: sealedContext, packagingExport: sealedPackagingExport, target: 'main-app', tag: 'linkwarden-ci-app:latest' });
     await mustRun(appBuild[0], appBuild.slice(1), {}, run);
     await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
       env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: 'linkwarden-ci-app:latest', CI_PLATFORM: 'linux/amd64' },
     }, run);
-    return context;
+    return sealedContext;
   } finally {
-    if (createdWorkspace) await rm(root, { recursive: true, force: true });
+    if (sealed) await rm(sealed.root, { recursive: true, force: true });
   }
+}
+
+function artifactMatchesRecipe(artifact, recipe) {
+  return artifact?.kind === 'Valid'
+    && artifact.recipeId === recipe.recipeId
+    && artifact.validatedLabels?.['io.linkwarden-slim.recipe-id'] === recipe.recipeId
+    && artifact.validatedLabels?.['org.opencontainers.image.version'] === recipe.upstreamTag
+    && artifact.validatedLabels?.['io.linkwarden-slim.upstream-revision'] === recipe.upstreamCommit;
+}
+
+function artifactMatchesUpstream(artifact, recipe) {
+  return artifact?.kind === 'Valid'
+    && artifact.validatedLabels?.['org.opencontainers.image.version'] === recipe.upstreamTag
+    && artifact.validatedLabels?.['io.linkwarden-slim.upstream-revision'] === recipe.upstreamCommit;
+}
+
+function requireSafeInspection(artifact, reference) {
+  if (!artifact || !['Missing', 'Valid'].includes(artifact.kind)) {
+    throw new Error(artifact?.message ?? `Unable to inspect ${reference}`);
+  }
+}
+
+function selectCanonicalVersion({ ghcrVersion, dockerVersion, recipe }) {
+  requireSafeInspection(ghcrVersion, 'GHCR version');
+  requireSafeInspection(dockerVersion, 'Docker version');
+  if (ghcrVersion.kind === 'Valid' && dockerVersion.kind === 'Valid') {
+    if (!compareArtifacts(ghcrVersion, dockerVersion)) throw new Error('GHCR and Docker version artifacts diverge');
+    if (!artifactMatchesUpstream(ghcrVersion, recipe)) throw new Error('Existing version artifact has a different upstream identity');
+    return { artifact: ghcrVersion, missing: [] };
+  }
+  if (ghcrVersion.kind === 'Valid') {
+    if (!artifactMatchesUpstream(ghcrVersion, recipe)) throw new Error('Existing GHCR version artifact has a different upstream identity');
+    return { artifact: ghcrVersion, missing: ['docker'] };
+  }
+  if (dockerVersion.kind === 'Valid') {
+    if (!artifactMatchesUpstream(dockerVersion, recipe)) throw new Error('Existing Docker version artifact has a different upstream identity');
+    return { artifact: dockerVersion, missing: ['ghcr'] };
+  }
+  return { artifact: undefined, missing: ['ghcr', 'docker'] };
+}
+
+async function testArtifactRuntime(artifact, input, run) {
+  await materializeDependencies(input, run);
+  for (const [platform, digest] of Object.entries(artifact.platformDigests)) {
+    await mustRun('bash', ['ci/materialize-image.sh', platform, `${artifact.sourceRef.split('@')[0]}@${digest}`, `linkwarden-ci-${platform.replace('/', '-')}:latest`], {}, run);
+    await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
+      env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: `linkwarden-ci-${platform.replace('/', '-')}:latest`, CI_PLATFORM: platform },
+    }, run);
+  }
+}
+
+function stagingSourceFromMetadata(staging, metadataText) {
+  let metadata;
+  try {
+    metadata = JSON.parse(metadataText);
+  } catch {
+    throw new Error('Malformed Buildx metadata');
+  }
+  const digest = metadata?.['containerimage.digest'];
+  if (!DIGEST.test(digest ?? '')) throw new Error('Buildx metadata does not contain a valid container image digest');
+  return formatSourceReference(parseDestinationReference(staging).repository, digest);
+}
+
+async function copyAndVerifyArtifact({ regctlPath, source, destination, expected, run }) {
+  await copyReference({ regctlPath, source, destination, run });
+  const copied = await inspectReference({ regctlPath, reference: destination, run });
+  if (!compareArtifacts(expected, copied)) {
+    throw new Error(`${destination} does not match the canonical artifact`);
+  }
+}
+
+async function requireCandidate({ regctlPath, reference, expected, run }) {
+  const candidate = await inspectReference({ regctlPath, reference, run });
+  if (!compareArtifacts(expected, candidate)) {
+    throw new Error(`${reference} does not match the verified artifact`);
+  }
+  return candidate;
 }
 
 export async function publishInput(input, {
@@ -89,71 +197,71 @@ export async function publishInput(input, {
   run = runCommand,
   registryRun,
   workspace,
+  readMetadata = (path) => readFile(path, 'utf8'),
+  digestPackaging,
 } = {}) {
-  const recipe = { ...input.recipe };
-  delete recipe.recipeId;
+  validateInputShape(input);
+  const recipe = input.recipe;
   for (const reference of [staging, ghcrCandidate, ghcrVersion, ghcrLatest, dockerCandidate, dockerVersion, dockerLatest]) parseDestinationReference(reference);
-  const [versionArtifact, latestArtifact] = await Promise.all([
+  const [initialGhcrCandidate, initialDockerCandidate, ghcrVersionArtifact, dockerVersionArtifact, ghcrLatestArtifact, dockerLatestArtifact] = await Promise.all([
+    inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerCandidate, run: registryRun }),
     inspectReference({ regctlPath, reference: ghcrVersion, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
     inspectReference({ regctlPath, reference: ghcrLatest, run: registryRun }),
+    inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
   ]);
-  const plan = planRun({ recipe, sourceArtifacts: [versionArtifact, latestArtifact], versionArtifact, latestArtifact, versionTag: ghcrVersion, latestTag: ghcrLatest });
-  if (plan.artifact.kind === 'Reuse') {
-    await copyReference({ regctlPath, source: plan.artifact.source, destination: ghcrCandidate, run: registryRun });
+  for (const [artifact, reference] of [
+    [initialGhcrCandidate, ghcrCandidate], [initialDockerCandidate, dockerCandidate],
+    [ghcrVersionArtifact, ghcrVersion], [dockerVersionArtifact, dockerVersion],
+    [ghcrLatestArtifact, ghcrLatest], [dockerLatestArtifact, dockerLatest],
+  ]) requireSafeInspection(artifact, reference);
+  const canonicalVersion = selectCanonicalVersion({
+    ghcrVersion: ghcrVersionArtifact,
+    dockerVersion: dockerVersionArtifact,
+    recipe,
+  });
+
+  let desiredArtifact;
+  let promotionSource;
+  if (artifactMatchesRecipe(initialGhcrCandidate, recipe)) {
+    desiredArtifact = initialGhcrCandidate;
+    promotionSource = initialGhcrCandidate.sourceRef;
+    await testArtifactRuntime(desiredArtifact, input, run);
   } else {
-    await validateInput(input, { run, workspace });
-    const stageWorkspace = workspace ?? await mkdtemp(join(tmpdir(), 'linkwarden-stage-'));
+    const sealed = await sealContext(input, { run, workspace, digestPackaging });
     try {
-      const context = join(stageWorkspace, 'context');
-      await prepareContext(input, context, run);
-      const metadataFile = join(stageWorkspace, 'metadata.json');
-      const stagingBuild = buildxStagingCommand({ input, context, staging, metadataFile });
+      await validateInput(input, { run, context: sealed.context, packagingExport: sealed.packagingExport });
+      const metadataFile = join(sealed.root, 'metadata.json');
+      const stagingBuild = buildxStagingCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, staging, metadataFile });
       await mustRun(stagingBuild[0], stagingBuild.slice(1), {}, run);
-      const staged = await inspectReference({ regctlPath, reference: staging, run: registryRun });
-      if (staged.kind !== 'Valid') throw new Error(staged.message ?? 'Staging artifact is invalid');
-      for (const [platform, digest] of Object.entries(staged.platformDigests)) {
-        await mustRun('bash', ['ci/materialize-image.sh', platform, `${staged.sourceRef.split('@')[0]}@${digest}`, `linkwarden-ci-${platform.replace('/', '-')}:latest`], {}, run);
-        await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
-          env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: `linkwarden-ci-${platform.replace('/', '-')}:latest`, CI_PLATFORM: platform },
-        }, run);
-      }
-      await copyReference({ regctlPath, source: staged.sourceRef, destination: ghcrCandidate, run: registryRun });
+      promotionSource = stagingSourceFromMetadata(staging, await readMetadata(metadataFile));
+      desiredArtifact = await inspectSourceReference({ regctlPath, sourceRef: promotionSource, run: registryRun });
+      if (!artifactMatchesRecipe(desiredArtifact, recipe)) throw new Error(desiredArtifact.message ?? 'Staging artifact does not match the resolved recipe');
+      await testArtifactRuntime(desiredArtifact, input, run);
+      await copyReference({ regctlPath, source: promotionSource, destination: ghcrCandidate, run: registryRun });
     } finally {
-      if (!workspace) await rm(stageWorkspace, { recursive: true, force: true });
+      await rm(sealed.root, { recursive: true, force: true });
     }
   }
-  const candidate = await inspectReference({ regctlPath, reference: ghcrCandidate, run: registryRun });
-  if (candidate.kind !== 'Valid') throw new Error(candidate.message ?? 'GHCR candidate is invalid');
-  await copyReference({ regctlPath, source: candidate.sourceRef, destination: dockerCandidate, run: registryRun });
-  const dockerArtifact = await inspectReference({ regctlPath, reference: dockerCandidate, run: registryRun });
-  if (dockerArtifact.kind !== 'Valid' || dockerArtifact.sourceRef === undefined) {
-    throw new Error(dockerArtifact.message ?? 'Docker Hub candidate is invalid');
-  }
+  await requireCandidate({ regctlPath, reference: ghcrCandidate, expected: desiredArtifact, run: registryRun });
+  await copyReference({ regctlPath, source: promotionSource, destination: dockerCandidate, run: registryRun });
+  await requireCandidate({ regctlPath, reference: dockerCandidate, expected: desiredArtifact, run: registryRun });
   const refreshed = freshInput ?? (freshInputPath ? await readInput(freshInputPath) : undefined);
   if (!refreshed || createRecipe(refreshed.recipe).recipeId !== createRecipe(input.recipe).recipeId) {
     throw new Error('Resolved inputs changed before tagging');
   }
-  if (plan.version.kind === 'SetTag') await copyReference({ regctlPath, source: candidate.sourceRef, destination: ghcrVersion, run: registryRun });
-  if (plan.latest.kind === 'SetTag') await copyReference({ regctlPath, source: candidate.sourceRef, destination: ghcrLatest, run: registryRun });
-  const [dockerVersionArtifact, dockerLatestArtifact] = await Promise.all([
-    inspectReference({ regctlPath, reference: dockerVersion, run: registryRun }),
-    inspectReference({ regctlPath, reference: dockerLatest, run: registryRun }),
-  ]);
-  const dockerPlan = planRun({
-    recipe,
-    sourceArtifacts: [dockerArtifact],
-    versionArtifact: dockerVersionArtifact,
-    latestArtifact: dockerLatestArtifact,
-    versionTag: dockerVersion,
-    latestTag: dockerLatest,
-  });
-  if (dockerPlan.version.kind === 'SetTag') {
-    await copyReference({ regctlPath, source: dockerArtifact.sourceRef, destination: dockerVersion, run: registryRun });
+  const canonicalSource = canonicalVersion.artifact?.sourceRef ?? promotionSource;
+  const canonicalArtifact = canonicalVersion.artifact ?? desiredArtifact;
+  if (canonicalVersion.missing.includes('ghcr')) {
+    await copyAndVerifyArtifact({ regctlPath, source: canonicalSource, destination: ghcrVersion, expected: canonicalArtifact, run: registryRun });
   }
-  if (dockerPlan.latest.kind === 'SetTag') {
-    await copyReference({ regctlPath, source: dockerArtifact.sourceRef, destination: dockerLatest, run: registryRun });
+  if (canonicalVersion.missing.includes('docker')) {
+    await copyAndVerifyArtifact({ regctlPath, source: canonicalSource, destination: dockerVersion, expected: canonicalArtifact, run: registryRun });
   }
-  return candidate;
+  if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: ghcrLatest, run: registryRun });
+  if (!compareArtifacts(dockerLatestArtifact, desiredArtifact)) await copyReference({ regctlPath, source: promotionSource, destination: dockerLatest, run: registryRun });
+  return desiredArtifact;
 }
 
 async function main() {
@@ -164,13 +272,11 @@ async function main() {
   const input = await readInput(inputPath);
   if (subcommand === 'validate') await validateInput(input, { run: runCommand });
   if (subcommand === 'verify-dockerfile') {
-    const workspace = await mkdtemp(join(tmpdir(), 'linkwarden-verify-'));
+    const sealed = await sealContext(input, { run: runCommand });
     try {
-      const context = join(workspace, 'context');
-      await prepareContext(input, context, runCommand);
-      const sourceDepsBuild = buildDockerCommand({ input, context, target: 'source-deps', tag: 'linkwarden-ci-source-deps:latest' });
+      const sourceDepsBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'source-deps', tag: 'linkwarden-ci-source-deps:latest' });
       await mustRun(sourceDepsBuild[0], sourceDepsBuild.slice(1), {}, runCommand);
-    } finally { await rm(workspace, { recursive: true, force: true }); }
+    } finally { await rm(sealed.root, { recursive: true, force: true }); }
   }
   if (subcommand === 'publish') {
     if (args.length % 2 !== 0) throw new Error('Publish options require values');

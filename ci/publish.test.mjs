@@ -24,7 +24,12 @@ const input = {
   recipe: createRecipe(recipe),
   nodeImage: `docker.io/library/node@${recipe.nodeIndexDigest}`,
   rustImage: `docker.io/library/rust@${recipe.rustIndexDigest}`,
+  postgresImage: `docker.io/library/postgres@sha256:${hex('f', 64)}`,
+  meiliImage: `docker.io/getmeili/meilisearch@sha256:${hex('f', 64)}`,
   packagingExport: '/tmp/packaging',
+  packagingUrl: 'https://github.com/example/linkwarden-docker.git',
+  upstreamSha: recipe.upstreamCommit,
+  upstreamUrl: 'https://github.com/example/linkwarden.git',
 };
 
 function validArtifact(sourceRef) {
@@ -83,7 +88,7 @@ test('validation builds source and runtime targets with recipe args before stack
     return { exitCode: 0, signal: null };
   };
 
-  await validateInput(input, { run, workspace: '/tmp/publish-validation' });
+  await validateInput(input, { run, digestPackaging: async () => input.recipe.packagingInputsDigest });
 
   const dockerCalls = calls.filter((call) => call.command === 'docker');
   assert.equal(dockerCalls.length, 2);
@@ -91,120 +96,196 @@ test('validation builds source and runtime targets with recipe args before stack
   assert.equal(dockerCalls.every((call) => call.args.includes('--file')), true);
   const bashCalls = calls.filter((call) => call.command === 'bash');
   assert.deepEqual(bashCalls.map((call) => call.args[0]), [
+    'ci/materialize-packaging.sh',
     'ci/prepare-context.sh',
     'ci/materialize-image.sh',
     'ci/materialize-image.sh',
     'ci/test-stack.sh',
     'ci/test-stack.sh',
   ]);
-  assert.deepEqual(bashCalls[1].args.slice(1), ['linux/amd64', input.postgresImage, 'linkwarden-ci-postgres:latest']);
-  assert.deepEqual(bashCalls[2].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
+  assert.deepEqual(bashCalls[2].args.slice(1), ['linux/amd64', input.postgresImage, 'linkwarden-ci-postgres:latest']);
+  assert.deepEqual(bashCalls[3].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
 });
 
-test('promotion tests staged children before copying through GHCR and Docker Hub candidates', async () => {
-  const commands = [];
+function recipeWithNodeDigest(character) {
+  return createRecipe({ ...recipe, nodeIndexDigest: `sha256:${hex(character, 64)}` });
+}
+
+function testArtifact(parentCharacter, childCharacters, artifactRecipe = createRecipe(recipe)) {
+  const sourceRef = `ghcr.io/example/app@sha256:${hex(parentCharacter, 64)}`;
+  const labels = {
+    ...validArtifact(sourceRef).validatedLabels,
+    'io.linkwarden-slim.recipe-id': artifactRecipe.recipeId,
+    'io.linkwarden-slim.node-base': artifactRecipe.nodeIndexDigest,
+  };
+  return {
+    parentDigest: `sha256:${hex(parentCharacter, 64)}`,
+    childDigests: {
+      'linux/amd64': `sha256:${hex(childCharacters[0], 64)}`,
+      'linux/arm64': `sha256:${hex(childCharacters[1], 64)}`,
+    },
+    labels,
+  };
+}
+
+function registryFixture({ artifacts, tags = {} }) {
+  const byParent = new Map(artifacts.map((current) => [current.parentDigest, current]));
+  const byChild = new Map(artifacts.flatMap((current) => Object.entries(current.childDigests).map(([platform, digest]) => [digest, { platform, labels: current.labels }])));
+  const currentTags = new Map(Object.entries(tags));
+  const calls = [];
   const copies = [];
-  const staged = validArtifact(`ghcr.io/example/app@sha256:${hex('3', 64)}`);
-  const ghcrCandidate = validArtifact(`ghcr.io/example/app@sha256:${hex('4', 64)}`);
-  const dockerCandidate = validArtifact(`docker.io/example/app@sha256:${hex('5', 64)}`);
+  const ok = (stdout) => ({ exitCode: 0, signal: null, stdout, stderr: '' });
   const registryRun = async (_command, args) => {
-    const reference = args.at(-2) ?? args.at(-1);
+    calls.push(args);
     if (args[0] === 'manifest' && args[1] === 'head') {
-      if (!reference.includes(':staging') && !reference.includes(':candidate')) {
-        return { exitCode: 1, signal: null, stdout: '', stderr: 'MANIFEST_UNKNOWN: manifest unknown' };
-      }
-      const digest = reference.includes(':staging') ? hex('3', 64)
-        : reference.includes(':candidate') && reference.startsWith('ghcr.io') ? hex('4', 64)
-          : reference.includes(':candidate') ? hex('5', 64) : hex('f', 64);
-      return { exitCode: 0, signal: null, stdout: `sha256:${digest}\n`, stderr: '' };
+      const current = currentTags.get(args[2]);
+      return current ? ok(`${current.parentDigest}\n`) : { exitCode: 1, signal: null, stdout: '', stderr: 'MANIFEST_UNKNOWN: manifest unknown' };
     }
     if (args[0] === 'manifest' && args[1] === 'get') {
-      return { exitCode: 0, signal: null, stdout: JSON.stringify({
+      const current = byParent.get(args[2].split('@')[1]);
+      if (!current) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing source' };
+      return ok(JSON.stringify({
         schemaVersion: 2,
         mediaType: 'application/vnd.oci.image.index.v1+json',
-        manifests: [
-          { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: `sha256:${hex('1', 64)}`, platform: { os: 'linux', architecture: 'amd64' } },
-          { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: `sha256:${hex('2', 64)}`, platform: { os: 'linux', architecture: 'arm64' } },
-        ],
-      }), stderr: '' };
+        manifests: Object.entries(current.childDigests).map(([platform, digest]) => {
+          const [os, architecture] = platform.split('/');
+          return { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest, platform: { os, architecture } };
+        }),
+      }));
     }
     if (args[0] === 'image' && args[1] === 'inspect') {
-      const architecture = args[2].endsWith(hex('1', 64)) ? 'amd64' : 'arm64';
-      return { exitCode: 0, signal: null, stdout: JSON.stringify({ os: 'linux', architecture, config: { Labels: staged.validatedLabels } }), stderr: '' };
+      const current = byChild.get(args[2].split('@')[1]);
+      const [, architecture] = current.platform.split('/');
+      return ok(JSON.stringify({ os: 'linux', architecture, config: { Labels: current.labels } }));
     }
-    copies.push(args);
-    return { exitCode: 0, signal: null, stdout: '', stderr: '' };
+    if (args[0] === 'image' && args[1] === 'copy') {
+      const source = byParent.get(args[2].split('@')[1]);
+      copies.push(args);
+      currentTags.set(args[3], source);
+      return ok('');
+    }
+    throw new Error(`Unexpected registry command: ${args.join(' ')}`);
   };
+  return { calls, copies, registryRun };
+}
+
+function publishOptions(overrides = {}) {
+  return {
+    regctlPath: 'regctl',
+    staging: 'ghcr.io/example/app:run-123',
+    ghcrCandidate: 'ghcr.io/example/app:candidate',
+    ghcrVersion: 'ghcr.io/example/app:v2.10.1',
+    ghcrLatest: 'ghcr.io/example/app:latest',
+    dockerCandidate: 'docker.io/example/app:candidate',
+    dockerVersion: 'docker.io/example/app:v2.10.1',
+    dockerLatest: 'docker.io/example/app:latest',
+    freshInput: input,
+    workspace: '/tmp',
+    digestPackaging: async () => input.recipe.packagingInputsDigest,
+    ...overrides,
+  };
+}
+
+test('promotes only the metadata-derived staging source after a staging tag is retargeted', async () => {
+  const staged = testArtifact('3', ['a', 'b']);
+  const retargeted = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
+  const registry = registryFixture({ artifacts: [staged, retargeted], tags: { 'ghcr.io/example/app:run-123': retargeted } });
+  const commands = [];
+  const mutableInput = { ...input };
   const run = async (command, args) => {
     commands.push([command, args]);
+    if (command === 'docker' && args[0] === 'build') mutableInput.packagingExport = '/changed-after-validation';
     return { exitCode: 0, signal: null };
   };
 
-  await publishInput(input, {
-    regctlPath: 'regctl',
-    staging: 'ghcr.io/example/app:staging',
-    ghcrCandidate: 'ghcr.io/example/app:candidate',
-    ghcrVersion: 'ghcr.io/example/app:v2.10.1',
-    ghcrLatest: 'ghcr.io/example/app:latest',
-    dockerCandidate: 'docker.io/example/app:candidate',
-    dockerVersion: 'docker.io/example/app:v2.10.1',
-    dockerLatest: 'docker.io/example/app:latest',
-    freshInput: input,
+  await publishInput(mutableInput, publishOptions({
+    registryRun: registry.registryRun,
     run,
-    registryRun,
-    workspace: '/tmp/publish-promotion',
-  });
+    readMetadata: async () => JSON.stringify({ 'containerimage.digest': staged.parentDigest }),
+  }));
 
-  assert.equal(commands.some(([command, args]) => command === 'bash' && args[0] === 'ci/materialize-image.sh' && args[1] === 'linux/arm64'), true);
-  assert.deepEqual(copies.slice(0, 2), [
-    ['image', 'copy', staged.sourceRef, 'ghcr.io/example/app:candidate'],
-    ['image', 'copy', ghcrCandidate.sourceRef, 'docker.io/example/app:candidate'],
-  ]);
+  const stagedSource = `ghcr.io/example/app@${staged.parentDigest}`;
+  assert.equal(registry.calls.some((args) => args[0] === 'manifest' && args[1] === 'head' && args[2] === 'ghcr.io/example/app:run-123'), false);
+  assert.equal(registry.copies.every((args) => args[2] === stagedSource), true);
+  assert.equal(commands.filter(([command]) => command === 'docker').every(([, args]) => !args.includes('/tmp/packaging/Dockerfile') && !args.includes('/changed-after-validation/Dockerfile')), true);
+  assert.equal(commands.filter(([command, args]) => command === 'bash' && args[0] === 'ci/materialize-packaging.sh').length, 1);
+  assert.equal(commands.filter(([command, args]) => command === 'bash' && args[0] === 'ci/prepare-context.sh').length, 1);
 });
 
-test('promotion preserves matching Docker Hub version and latest tags', async () => {
-  const copies = [];
-  const labels = validArtifact(`ghcr.io/example/app@sha256:${hex('3', 64)}`).validatedLabels;
-  const registryRun = async (_command, args) => {
-    if (args[0] === 'manifest' && args[1] === 'head') {
-      return { exitCode: 0, signal: null, stdout: `sha256:${hex('3', 64)}\n`, stderr: '' };
-    }
-    if (args[0] === 'manifest' && args[1] === 'get') {
-      return { exitCode: 0, signal: null, stdout: JSON.stringify({
-        schemaVersion: 2,
-        mediaType: 'application/vnd.oci.image.index.v1+json',
-        manifests: [
-          { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: `sha256:${hex('1', 64)}`, platform: { os: 'linux', architecture: 'amd64' } },
-          { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: `sha256:${hex('2', 64)}`, platform: { os: 'linux', architecture: 'arm64' } },
-        ],
-      }), stderr: '' };
-    }
-    if (args[0] === 'image' && args[1] === 'inspect') {
-      return { exitCode: 0, signal: null, stdout: JSON.stringify({
-        os: 'linux',
-        architecture: args[2].endsWith(hex('1', 64)) ? 'amd64' : 'arm64',
-        config: { Labels: labels },
-      }), stderr: '' };
-    }
-    copies.push(args);
-    return { exitCode: 0, signal: null, stdout: '', stderr: '' };
-  };
+test('mirrors a valid GHCR version artifact to a missing Docker version without replacing it with the desired latest', async () => {
+  const canonical = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
+  const desiredCandidate = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [canonical, desiredCandidate],
+    tags: {
+      'ghcr.io/example/app:v2.10.1': canonical,
+      'ghcr.io/example/app:candidate': desiredCandidate,
+    },
+  });
+  const run = async () => ({ exitCode: 0, signal: null });
 
-  await publishInput(input, {
-    regctlPath: 'regctl',
-    staging: 'ghcr.io/example/app:staging',
-    ghcrCandidate: 'ghcr.io/example/app:candidate',
-    ghcrVersion: 'ghcr.io/example/app:v2.10.1',
-    ghcrLatest: 'ghcr.io/example/app:latest',
-    dockerCandidate: 'docker.io/example/app:candidate',
-    dockerVersion: 'docker.io/example/app:v2.10.1',
-    dockerLatest: 'docker.io/example/app:latest',
-    freshInput: input,
-    registryRun,
+  await publishInput(input, publishOptions({ registryRun: registry.registryRun, run }));
+
+  assert.deepEqual(registry.copies.find((args) => args[3] === 'docker.io/example/app:v2.10.1'), [
+    'image', 'copy', `ghcr.io/example/app@${canonical.parentDigest}`, 'docker.io/example/app:v2.10.1',
+  ]);
+  assert.equal(registry.copies.some((args) => args[3] === 'ghcr.io/example/app:v2.10.1'), false);
+  assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desiredCandidate.parentDigest}`), true);
+});
+
+test('fails before registry writes when GHCR and Docker version artifacts diverge', async () => {
+  const ghcrVersion = testArtifact('4', ['c', 'd']);
+  const dockerVersion = testArtifact('5', ['e', 'f'], recipeWithNodeDigest('f'));
+  const registry = registryFixture({
+    artifacts: [ghcrVersion, dockerVersion],
+    tags: {
+      'ghcr.io/example/app:v2.10.1': ghcrVersion,
+      'docker.io/example/app:v2.10.1': dockerVersion,
+    },
   });
 
-  assert.deepEqual(copies.map((args) => args.at(-1)), [
-    'ghcr.io/example/app:candidate',
-    'docker.io/example/app:candidate',
-  ]);
+  await assert.rejects(
+    publishInput(input, publishOptions({ registryRun: registry.registryRun, run: async () => ({ exitCode: 0, signal: null }) })),
+    /diverge|match/i,
+  );
+  assert.deepEqual(registry.copies, []);
+});
+
+test('keeps matching immutable versions while the desired candidate updates latest', async () => {
+  const canonical = testArtifact('4', ['c', 'd'], recipeWithNodeDigest('f'));
+  const desired = testArtifact('3', ['a', 'b']);
+  const registry = registryFixture({
+    artifacts: [canonical, desired],
+    tags: {
+      'ghcr.io/example/app:v2.10.1': canonical,
+      'docker.io/example/app:v2.10.1': canonical,
+      'ghcr.io/example/app:candidate': desired,
+    },
+  });
+
+  await publishInput(input, publishOptions({ registryRun: registry.registryRun, run: async () => ({ exitCode: 0, signal: null }) }));
+
+  assert.equal(registry.copies.some((args) => args[3].endsWith(':v2.10.1')), false);
+  assert.equal(registry.copies.filter((args) => args[3].endsWith(':latest')).every((args) => args[2] === `ghcr.io/example/app@${desired.parentDigest}`), true);
+});
+
+test('rejects a reused candidate that matches only the recipe id but not its complete recipe labels', async () => {
+  const candidate = testArtifact('3', ['a', 'b']);
+  candidate.labels['io.linkwarden-slim.node-base'] = `sha256:${hex('f', 64)}`;
+  const registry = registryFixture({ artifacts: [candidate], tags: { 'ghcr.io/example/app:candidate': candidate } });
+  const commands = [];
+
+  await assert.rejects(
+    publishInput(input, publishOptions({
+      registryRun: registry.registryRun,
+      run: async (command, args) => {
+        commands.push([command, args]);
+        return { exitCode: 0, signal: null };
+      },
+      readMetadata: async () => JSON.stringify({ 'containerimage.digest': candidate.parentDigest }),
+    })),
+    /recipe id|resolved recipe/i,
+  );
+  assert.equal(commands.some(([command]) => command === 'docker'), false);
+  assert.deepEqual(registry.copies, []);
 });

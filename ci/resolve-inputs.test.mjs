@@ -64,6 +64,7 @@ function args({ regctl, packagingExport, out }) {
     '--packaging-sha', hex('d', 40),
     '--packaging-export', packagingExport,
     '--upstream-tag', 'v2.10.1',
+    '--upstream-url', 'https://github.com/example/linkwarden.git',
     '--upstream-sha', hex('e', 40),
     '--postgres', 'docker.io/library/postgres:16-bookworm',
     '--meili', 'docker.io/getmeili/meilisearch:v1.12.3',
@@ -91,8 +92,21 @@ test('resolves tag references to immutable indexes and amd64 service children', 
   assert.equal(input.postgresImage, `docker.io/library/postgres@${amd64Digest}`);
   assert.equal(input.meiliImage, `docker.io/getmeili/meilisearch@${amd64Digest}`);
   assert.equal(input.packagingExport, current.packagingExport);
+  assert.equal(input.upstreamUrl, 'https://github.com/example/linkwarden.git');
   assert.equal(input.upstreamSha, hex('e', 40));
   assert.match(input.recipe.packagingInputsDigest, /^sha256:[a-f0-9]{64}$/);
+});
+
+test('requires the immutable upstream URL used to seal the publish context', async (t) => {
+  const current = await fixture();
+  t.after(() => rm(current.directory, { recursive: true, force: true }));
+
+  const command = args({ ...current, out: join(current.directory, 'inputs.json') });
+  const upstreamUrl = command.indexOf('--upstream-url');
+  const result = await run('node', [...command.slice(0, upstreamUrl), ...command.slice(upstreamUrl + 2)]);
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /--upstream-url/);
 });
 
 test('rejects registry indexes that do not contain linux/amd64', async (t) => {

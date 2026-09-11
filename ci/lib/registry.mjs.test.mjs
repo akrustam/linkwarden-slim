@@ -14,7 +14,12 @@ import {
   validateArtifact,
 } from './artifact.mjs';
 import { createRecipe } from './recipe.mjs';
-import { MAX_OUTPUT_BYTES, copyReference, inspectReference } from './registry.mjs';
+import {
+  MAX_OUTPUT_BYTES,
+  copyReference,
+  inspectReference,
+  inspectSourceReference,
+} from './registry.mjs';
 import { planRun } from './planner.mjs';
 
 const hex = (character, length) => character.repeat(length);
@@ -117,6 +122,25 @@ test('inspects a parent index, then its exact target manifests, retaining the pa
     ['fake-regctl', ['image', 'inspect', `${repository}@${amd64Digest}`], { REGCTL_LOG: 'warn' }],
     ['fake-regctl', ['image', 'inspect', `${repository}@${arm64Digest}`], { REGCTL_LOG: 'warn' }],
   ]);
+});
+
+test('inspects an immutable source reference without resolving a mutable tag', async () => {
+  const calls = [];
+  const sourceRef = `${repository}@${parentDigest}`;
+  const result = await inspectSourceReference({
+    regctlPath: 'fake-regctl',
+    sourceRef,
+    run: async (command, args) => {
+      calls.push([command, args]);
+      if (args[0] === 'manifest' && args[1] === 'get') return ok(JSON.stringify(index()));
+      return ok(JSON.stringify(args.at(-1).endsWith(amd64Digest) ? config('amd64') : config('arm64')));
+    },
+  });
+
+  assert.equal(result.kind, 'Valid');
+  assert.equal(result.sourceRef, sourceRef);
+  assert.equal(calls.some(([, args]) => args[0] === 'manifest' && args[1] === 'head'), false);
+  assert.deepEqual(calls[0], ['fake-regctl', ['manifest', 'get', sourceRef, '--format', 'raw-body']]);
 });
 
 test('accepts the digest output form from manifest head', async () => {

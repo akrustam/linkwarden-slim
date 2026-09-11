@@ -109,34 +109,21 @@ function parseJson(stdout, description) {
 }
 
 /**
- * Inspect one registry reference by first resolving its immutable parent index,
- * then inspecting every required platform manifest from that exact index.
+ * Inspect a digest-qualified source without resolving any mutable tag.
  *
- * @param {{regctlPath: string, reference: string, env?: NodeJS.ProcessEnv, run?: Function}} input
+ * @param {{regctlPath: string, sourceRef: string, env?: NodeJS.ProcessEnv, run?: Function}} input
  * @returns {Promise<object>}
  */
-export async function inspectReference({ regctlPath, reference, env, run = defaultRun } = {}) {
-  let parsedReference;
+export async function inspectSourceReference({ regctlPath, sourceRef, env, run = defaultRun } = {}) {
+  let parsedSource;
   try {
-    parsedReference = parseDestinationReference(reference);
+    parsedSource = parseSourceReference(sourceRef);
   } catch {
-    return error('Invalid registry reference');
+    return error('Invalid registry source reference');
   }
   if (typeof regctlPath !== 'string' || regctlPath.length === 0) {
-    return error('regctlPath and reference are required');
+    return error('regctlPath and sourceRef are required');
   }
-  const head = await invoke(run, regctlPath, ['manifest', 'head', reference, '--require-digest'], env);
-  if (head.failure) {
-    return isMissing(head.failure)
-      ? { kind: 'Missing' }
-      : error(`Unable to inspect ${reference}: ${resultText(head.failure) || 'regctl failed'}`);
-  }
-
-  const parentDigest = parentDigestFromHead(head.result.stdout);
-  if (!parentDigest || !DIGEST.test(parentDigest)) {
-    return error(`Malformed manifest head response for ${reference}`);
-  }
-  const sourceRef = formatSourceReference(parsedReference.repository, parentDigest);
   const manifest = await invoke(run, regctlPath, ['manifest', 'get', sourceRef, '--format', 'raw-body'], env);
   if (manifest.failure) {
     return error(`Unable to fetch ${sourceRef}: ${resultText(manifest.failure) || 'regctl failed'}`);
@@ -160,7 +147,7 @@ export async function inspectReference({ regctlPath, reference, env, run = defau
     if (!descriptor || !DIGEST.test(descriptor.digest ?? '')) {
       continue;
     }
-    const platformRef = formatSourceReference(parsedReference.repository, descriptor.digest);
+    const platformRef = formatSourceReference(parsedSource.repository, descriptor.digest);
     const inspected = await invoke(run, regctlPath, ['image', 'inspect', platformRef], env);
     if (inspected.failure) {
       return error(`Unable to inspect ${platform} manifest: ${resultText(inspected.failure) || 'regctl failed'}`);
@@ -172,6 +159,40 @@ export async function inspectReference({ regctlPath, reference, env, run = defau
     }
   }
   return validateArtifact({ sourceRef, index, configs });
+}
+
+/**
+ * Resolve a mutable tag once, then inspect its immutable parent source.
+ *
+ * @param {{regctlPath: string, reference: string, env?: NodeJS.ProcessEnv, run?: Function}} input
+ * @returns {Promise<object>}
+ */
+export async function inspectReference({ regctlPath, reference, env, run = defaultRun } = {}) {
+  let parsedReference;
+  try {
+    parsedReference = parseDestinationReference(reference);
+  } catch {
+    return error('Invalid registry reference');
+  }
+  if (typeof regctlPath !== 'string' || regctlPath.length === 0) {
+    return error('regctlPath and reference are required');
+  }
+  const head = await invoke(run, regctlPath, ['manifest', 'head', reference, '--require-digest'], env);
+  if (head.failure) {
+    return isMissing(head.failure)
+      ? { kind: 'Missing' }
+      : error(`Unable to inspect ${reference}: ${resultText(head.failure) || 'regctl failed'}`);
+  }
+  const parentDigest = parentDigestFromHead(head.result.stdout);
+  if (!parentDigest || !DIGEST.test(parentDigest)) {
+    return error(`Malformed manifest head response for ${reference}`);
+  }
+  return inspectSourceReference({
+    regctlPath,
+    sourceRef: formatSourceReference(parsedReference.repository, parentDigest),
+    env,
+    run,
+  });
 }
 
 /**

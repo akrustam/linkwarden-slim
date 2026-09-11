@@ -26,13 +26,13 @@ function parseArgs(argv) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!flag?.startsWith('--') || value === undefined || options[flag] !== undefined) {
-      fail('Usage: resolve-inputs.mjs --regctl PATH --packaging-url URL --packaging-sha SHA --packaging-export DIR --upstream-tag TAG --upstream-sha SHA --postgres REF --meili REF --node REF --rust REF --monolith-version VERSION --out FILE');
+      fail('Usage: resolve-inputs.mjs --regctl PATH --packaging-url URL --packaging-sha SHA --packaging-export DIR --upstream-tag TAG --upstream-url URL --upstream-sha SHA --postgres REF --meili REF --node REF --rust REF --monolith-version VERSION --out FILE');
     }
     options[flag] = value;
   }
   for (const flag of [
     '--regctl', '--packaging-url', '--packaging-sha', '--packaging-export', '--upstream-tag',
-    '--upstream-sha', '--postgres', '--meili', '--node', '--rust', '--monolith-version', '--out',
+    '--upstream-url', '--upstream-sha', '--postgres', '--meili', '--node', '--rust', '--monolith-version', '--out',
   ]) {
     if (!options[flag]) fail(`Missing ${flag}`);
   }
@@ -169,6 +169,7 @@ export async function resolveInputs(options, { run = runCommand } = {}) {
     rustImage: rust.sourceRef,
     upstreamSha: options['--upstream-sha'],
     upstreamTag: options['--upstream-tag'],
+    upstreamUrl: options['--upstream-url'],
   };
 }
 
