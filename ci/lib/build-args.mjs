@@ -1,9 +1,10 @@
+import { parseSourceReference } from './reference.mjs';
 import { createRecipe } from './recipe.mjs';
 
-const DIGEST_REFERENCE = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
-
 function requireDigestReference(name, value) {
-  if (typeof value !== 'string' || !DIGEST_REFERENCE.test(value)) {
+  try {
+    parseSourceReference(value);
+  } catch {
     throw new TypeError(`Invalid ${name}: expected a digest-qualified image reference`);
   }
 }

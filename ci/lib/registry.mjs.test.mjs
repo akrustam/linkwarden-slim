@@ -13,24 +13,43 @@ import {
   compareArtifacts,
   validateArtifact,
 } from './artifact.mjs';
-import { copyReference, inspectReference } from './registry.mjs';
+import { createRecipe } from './recipe.mjs';
+import { MAX_OUTPUT_BYTES, copyReference, inspectReference } from './registry.mjs';
+import { planRun } from './planner.mjs';
 
 const hex = (character, length) => character.repeat(length);
-const recipeId = hex('a', 64);
 const parentDigest = `sha256:${hex('b', 64)}`;
 const amd64Digest = `sha256:${hex('c', 64)}`;
 const arm64Digest = `sha256:${hex('d', 64)}`;
 const repository = 'registry.example/linkwarden-slim';
-const labels = {
-  [RECIPE_ID_LABEL]: recipeId,
-  [VERSION_LABEL]: 'v2.15.1',
-  [PACKAGING_INPUTS_DIGEST_LABEL]: `sha256:${hex('e', 64)}`,
-  [UPSTREAM_REVISION_LABEL]: hex('f', 40),
-  [PACKAGING_SOURCE_REVISION_LABEL]: hex('1', 40),
-  [NODE_BASE_LABEL]: `sha256:${hex('2', 64)}`,
-  [RUST_BASE_LABEL]: `sha256:${hex('3', 64)}`,
-  [MONOLITH_VERSION_LABEL]: '2.8.3',
-};
+function recipeInput(overrides = {}) {
+  return {
+    schemaVersion: 'v1',
+    upstreamTag: 'v2.15.1',
+    upstreamCommit: hex('f', 40),
+    packagingSourceSha: hex('1', 40),
+    nodeIndexDigest: `sha256:${hex('2', 64)}`,
+    rustIndexDigest: `sha256:${hex('3', 64)}`,
+    packagingInputsDigest: `sha256:${hex('e', 64)}`,
+    monolithVersion: '2.8.3',
+    ...overrides,
+  };
+}
+
+function labelsFor(recipe = createRecipe(recipeInput())) {
+  return {
+    [RECIPE_ID_LABEL]: recipe.recipeId,
+    [VERSION_LABEL]: recipe.upstreamTag,
+    [PACKAGING_INPUTS_DIGEST_LABEL]: recipe.packagingInputsDigest,
+    [UPSTREAM_REVISION_LABEL]: recipe.upstreamCommit,
+    [PACKAGING_SOURCE_REVISION_LABEL]: recipe.packagingSourceSha,
+    [NODE_BASE_LABEL]: recipe.nodeIndexDigest,
+    [RUST_BASE_LABEL]: recipe.rustIndexDigest,
+    [MONOLITH_VERSION_LABEL]: recipe.monolithVersion,
+  };
+}
+
+const labels = labelsFor();
 
 function index(manifests = targetDescriptors()) {
   return {
@@ -93,11 +112,26 @@ test('inspects a parent index, then its exact target manifests, retaining the pa
     'linux/arm64': arm64Digest,
   });
   assert.deepEqual(calls.map(({ command, args, options }) => [command, args, options.env]), [
-    ['fake-regctl', ['manifest', 'head', '--require-digest', `${repository}:v2.15.1`], { REGCTL_LOG: 'warn' }],
-    ['fake-regctl', ['manifest', 'get', '--format', 'raw-body', `${repository}@${parentDigest}`], { REGCTL_LOG: 'warn' }],
+    ['fake-regctl', ['manifest', 'head', `${repository}:v2.15.1`, '--require-digest'], { REGCTL_LOG: 'warn' }],
+    ['fake-regctl', ['manifest', 'get', `${repository}@${parentDigest}`, '--format', 'raw-body'], { REGCTL_LOG: 'warn' }],
     ['fake-regctl', ['image', 'inspect', `${repository}@${amd64Digest}`], { REGCTL_LOG: 'warn' }],
     ['fake-regctl', ['image', 'inspect', `${repository}@${arm64Digest}`], { REGCTL_LOG: 'warn' }],
   ]);
+});
+
+test('accepts the digest output form from manifest head', async () => {
+  const result = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:v2.15.1`,
+    run: async (_command, args) => {
+      if (args[0] === 'manifest' && args[1] === 'head') return ok(`${parentDigest}\n`);
+      if (args[0] === 'manifest' && args[1] === 'get') return ok(JSON.stringify(index()));
+      return ok(JSON.stringify(args.at(-1).endsWith(amd64Digest) ? config('amd64') : config('arm64')));
+    },
+  });
+
+  assert.equal(result.kind, 'Valid');
+  assert.equal(result.sourceRef, `${repository}@${parentDigest}`);
 });
 
 test('classifies only manifest unknown or actual 404 responses as missing', async () => {
@@ -111,9 +145,15 @@ test('classifies only manifest unknown or actual 404 responses as missing', asyn
     reference: `${repository}:private`,
     run: async () => ok('', { exitCode: 1, stderr: 'unauthorized: authentication required (401)' }),
   });
+  const generic404 = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:unknown`,
+    run: async () => ok('', { exitCode: 1, statusCode: 404, stderr: 'HTTP 404' }),
+  });
 
   assert.equal(missing.kind, 'Missing');
   assert.equal(unauthorized.kind, 'Error');
+  assert.equal(generic404.kind, 'Error');
 });
 
 test('reports malformed manifest-head output as an error instead of throwing', async () => {
@@ -150,6 +190,7 @@ test('allows attestation descriptors only alongside exactly two target app manif
   const attestation = {
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     digest: `sha256:${hex('f', 64)}`,
+    platform: { os: 'unknown', architecture: 'unknown' },
     annotations: { 'vnd.docker.reference.type': 'attestation-manifest' },
   };
   const valid = validateArtifact({
@@ -169,6 +210,19 @@ test('allows attestation descriptors only alongside exactly two target app manif
 
   assert.equal(valid.kind, 'Valid');
   assert.equal(conflict.kind, 'Conflict');
+});
+
+test('rejects structurally malformed attestation descriptors', () => {
+  const malformed = validateArtifact({
+    sourceRef: `${repository}@${parentDigest}`,
+    index: index([...targetDescriptors(), {
+      digest: `sha256:${hex('f', 64)}`,
+      annotations: { 'vnd.docker.reference.type': 'attestation-manifest' },
+    }]),
+    configs: { 'linux/amd64': config('amd64'), 'linux/arm64': config('arm64') },
+  });
+
+  assert.equal(malformed.kind, 'Conflict');
 });
 
 test('rejects platform descriptors that are not image manifests', () => {
@@ -211,6 +265,33 @@ test('requires every approved provenance label in both target configs', () => {
   });
 
   assert.equal(missingNodeBase.kind, 'Conflict');
+});
+
+test('ignores incidental inherited labels when comparing target provenance', () => {
+  const valid = validateArtifact({
+    sourceRef: `${repository}@${parentDigest}`,
+    index: index(),
+    configs: {
+      'linux/amd64': config('amd64', { ...labels, 'org.opencontainers.image.created': '2026-09-10T00:00:00Z' }),
+      'linux/arm64': config('arm64', { ...labels, 'org.opencontainers.image.created': '2026-09-11T00:00:00Z' }),
+    },
+  });
+
+  assert.equal(valid.kind, 'Valid');
+  assert.deepEqual(valid.validatedLabels, labels);
+});
+
+test('rejects a recipe id label that does not match its provenance labels', () => {
+  const mismatchedRecipeId = validateArtifact({
+    sourceRef: `${repository}@${parentDigest}`,
+    index: index(),
+    configs: {
+      'linux/amd64': config('amd64', { ...labels, [RECIPE_ID_LABEL]: hex('a', 64) }),
+      'linux/arm64': config('arm64', { ...labels, [RECIPE_ID_LABEL]: hex('a', 64) }),
+    },
+  });
+
+  assert.equal(mismatchedRecipeId.kind, 'Conflict');
 });
 
 test('rejects an invalid packaging inputs digest label', () => {
@@ -263,7 +344,7 @@ test('copies only immutable digest-qualified source references', async () => {
   assert.deepEqual(calls, [['regctl', ['image', 'copy', `${repository}@${parentDigest}`, `${repository}:latest`]]]);
   await assert.rejects(
     copyReference({ regctlPath: 'regctl', source: `${repository}:v2.15.1`, destination: `${repository}:latest`, run }),
-    /digest-qualified/,
+    /valid registry references/,
   );
   await assert.rejects(
     copyReference({
@@ -274,4 +355,36 @@ test('copies only immutable digest-qualified source references', async () => {
     }),
     /copy failed/,
   );
+});
+
+test('caps injected registry command output before parsing it', async () => {
+  for (const result of [
+    ok('x'.repeat(MAX_OUTPUT_BYTES + 1)),
+    ok('', { stderr: 'x'.repeat(MAX_OUTPUT_BYTES + 1) }),
+  ]) {
+    const inspected = await inspectReference({
+      regctlPath: 'regctl',
+      reference: `${repository}:too-large`,
+      run: async () => result,
+    });
+    assert.equal(inspected.kind, 'Error');
+    assert.match(inspected.message, /output limit/);
+  }
+});
+
+test('generic 404 inspection errors cannot plan an immutable version tag update', async () => {
+  const inspected = await inspectReference({
+    regctlPath: 'regctl',
+    reference: `${repository}:v2.15.1`,
+    run: async () => ok('', { exitCode: 1, statusCode: 404, stderr: 'HTTP 404' }),
+  });
+
+  assert.throws(() => planRun({
+    recipe: recipeInput(),
+    sourceArtifacts: [],
+    versionArtifact: inspected,
+    latestArtifact: { kind: 'Missing' },
+    versionTag: `${repository}:v2.15.1`,
+    latestTag: `${repository}:latest`,
+  }), /HTTP 404/);
 });

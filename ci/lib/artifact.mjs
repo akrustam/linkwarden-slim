@@ -1,3 +1,6 @@
+import { parseSourceReference } from './reference.mjs';
+import { createRecipe } from './recipe.mjs';
+
 export const TARGET_PLATFORMS = ['linux/amd64', 'linux/arm64'];
 export const VERSION_LABEL = 'org.opencontainers.image.version';
 export const PACKAGING_INPUTS_DIGEST_LABEL = 'org.opencontainers.image.revision';
@@ -13,6 +16,16 @@ const RECIPE_ID = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const IMAGE_MANIFEST = /^application\/vnd\.(?:oci\.image\.manifest\.v1|docker\.distribution\.manifest\.v2)\+json$/;
 const INDEX_MANIFEST = /^application\/vnd\.(?:oci\.image\.index\.v1|docker\.distribution\.manifest\.list\.v2)\+json$/;
+const PROVENANCE_LABELS = [
+  RECIPE_ID_LABEL,
+  VERSION_LABEL,
+  PACKAGING_INPUTS_DIGEST_LABEL,
+  UPSTREAM_REVISION_LABEL,
+  PACKAGING_SOURCE_REVISION_LABEL,
+  NODE_BASE_LABEL,
+  RUST_BASE_LABEL,
+  MONOLITH_VERSION_LABEL,
+];
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -31,20 +44,21 @@ function conflict(message) {
 
 function selectedLabels(config) {
   const labels = config?.config?.Labels;
-  if (!isRecord(labels) || Object.values(labels).some((value) => typeof value !== 'string')) {
+  if (!isRecord(labels)) {
     return null;
   }
-  if (!RECIPE_ID.test(labels[RECIPE_ID_LABEL] ?? '')
-    || typeof labels[VERSION_LABEL] !== 'string' || labels[VERSION_LABEL].length === 0
-    || !DIGEST.test(labels[PACKAGING_INPUTS_DIGEST_LABEL] ?? '')
-    || !REVISION.test(labels[UPSTREAM_REVISION_LABEL] ?? '')
-    || !REVISION.test(labels[PACKAGING_SOURCE_REVISION_LABEL] ?? '')
-    || !DIGEST.test(labels[NODE_BASE_LABEL] ?? '')
-    || !DIGEST.test(labels[RUST_BASE_LABEL] ?? '')
-    || typeof labels[MONOLITH_VERSION_LABEL] !== 'string' || labels[MONOLITH_VERSION_LABEL].length === 0) {
+  const selected = Object.fromEntries(PROVENANCE_LABELS.map((name) => [name, labels[name]]));
+  if (!RECIPE_ID.test(selected[RECIPE_ID_LABEL] ?? '')
+    || typeof selected[VERSION_LABEL] !== 'string' || selected[VERSION_LABEL].length === 0
+    || !DIGEST.test(selected[PACKAGING_INPUTS_DIGEST_LABEL] ?? '')
+    || !REVISION.test(selected[UPSTREAM_REVISION_LABEL] ?? '')
+    || !REVISION.test(selected[PACKAGING_SOURCE_REVISION_LABEL] ?? '')
+    || !DIGEST.test(selected[NODE_BASE_LABEL] ?? '')
+    || !DIGEST.test(selected[RUST_BASE_LABEL] ?? '')
+    || typeof selected[MONOLITH_VERSION_LABEL] !== 'string' || selected[MONOLITH_VERSION_LABEL].length === 0) {
     return null;
   }
-  return { ...labels };
+  return selected;
 }
 
 function descriptorPlatform(descriptor) {
@@ -58,6 +72,28 @@ function isAttestation(descriptor) {
   return descriptor?.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest';
 }
 
+function validAttestation(descriptor) {
+  return isRecord(descriptor)
+    && DIGEST.test(descriptor.digest ?? '')
+    && IMAGE_MANIFEST.test(descriptor.mediaType ?? '')
+    && descriptor?.platform?.os === 'unknown'
+    && descriptor?.platform?.architecture === 'unknown'
+    && isAttestation(descriptor);
+}
+
+function recipeFromLabels(labels) {
+  return createRecipe({
+    schemaVersion: 'v1',
+    upstreamTag: labels[VERSION_LABEL],
+    upstreamCommit: labels[UPSTREAM_REVISION_LABEL],
+    packagingSourceSha: labels[PACKAGING_SOURCE_REVISION_LABEL],
+    nodeIndexDigest: labels[NODE_BASE_LABEL],
+    rustIndexDigest: labels[RUST_BASE_LABEL],
+    packagingInputsDigest: labels[PACKAGING_INPUTS_DIGEST_LABEL],
+    monolithVersion: labels[MONOLITH_VERSION_LABEL],
+  });
+}
+
 /**
  * Validate an OCI index and the configs selected from its target descriptors.
  * Incompatible, but parseable, content is a Conflict; adapters reserve Error
@@ -67,7 +103,9 @@ function isAttestation(descriptor) {
  * @returns {{kind: 'Valid', recipeId: string, sourceRef: string, platformDigests: Record<'linux/amd64'|'linux/arm64', string>, validatedLabels: Record<string, string>} | {kind: 'Conflict', message: string} | {kind: 'Error', message: string}}
  */
 export function validateArtifact({ sourceRef, index, configs } = {}) {
-  if (typeof sourceRef !== 'string' || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(sourceRef)) {
+  try {
+    parseSourceReference(sourceRef);
+  } catch {
     return { kind: 'Error', message: 'Invalid artifact source reference' };
   }
   if (!isRecord(index) || !Array.isArray(index.manifests) || !isRecord(configs)) {
@@ -79,11 +117,14 @@ export function validateArtifact({ sourceRef, index, configs } = {}) {
 
   const selected = new Map();
   for (const descriptor of index.manifests) {
+    if (isAttestation(descriptor)) {
+      if (!validAttestation(descriptor)) {
+        return conflict('Invalid attestation descriptor');
+      }
+      continue;
+    }
     if (!isRecord(descriptor) || !DIGEST.test(descriptor.digest ?? '')) {
       return conflict('Invalid manifest descriptor');
-    }
-    if (isAttestation(descriptor)) {
-      continue;
     }
     if (!IMAGE_MANIFEST.test(descriptor.mediaType ?? '')) {
       return conflict('Application descriptor must be an image manifest');
@@ -122,9 +163,19 @@ export function validateArtifact({ sourceRef, index, configs } = {}) {
     validatedLabels = labels;
   }
 
+  let recipe;
+  try {
+    recipe = recipeFromLabels(validatedLabels);
+  } catch {
+    return conflict('Invalid recipe provenance labels');
+  }
+  if (recipe.recipeId !== validatedLabels[RECIPE_ID_LABEL]) {
+    return conflict('Recipe id does not match provenance labels');
+  }
+
   return {
     kind: 'Valid',
-    recipeId: validatedLabels[RECIPE_ID_LABEL],
+    recipeId: recipe.recipeId,
     sourceRef,
     platformDigests: Object.fromEntries(TARGET_PLATFORMS.map((platform) => [platform, selected.get(platform)])),
     validatedLabels,

@@ -51,5 +51,13 @@ test('rejects incomplete recipes and non-digest-qualified base images', () => {
     () => buildArgsForRecipe({ recipe: value, nodeImage: 'docker.io/library/node:22', rustImage: 'docker.io/library/rust@sha256:' + hex('2', 64) }),
     /nodeImage/,
   );
+  assert.throws(
+    () => buildArgsForRecipe({
+      recipe: value,
+      nodeImage: `docker.io/library/node:22@sha256:${hex('1', 64)}`,
+      rustImage: `docker.io/library/rust@sha256:${hex('2', 64)}`,
+    }),
+    /nodeImage/,
+  );
   assert.throws(() => buildArgPairs('not-an-array'), /array/);
 });

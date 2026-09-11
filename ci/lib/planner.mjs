@@ -5,26 +5,21 @@ import {
   VERSION_LABEL,
   compareArtifacts,
 } from './artifact.mjs';
+import { parseDestinationReference, parseSourceReference } from './reference.mjs';
+import { createRecipe } from './recipe.mjs';
 
 export { TARGET_PLATFORMS };
 
-function requirePlatforms(platforms) {
-  if (!Array.isArray(platforms)
-    || platforms.length !== TARGET_PLATFORMS.length
-    || TARGET_PLATFORMS.some((platform) => !platforms.includes(platform))) {
-    throw new TypeError('Requested platforms must include exactly linux/amd64 and linux/arm64');
+function requireRecipe(recipe) {
+  if (recipe?.recipeId !== undefined) {
+    throw new TypeError('Recipe input must not supply recipeId');
   }
-}
-
-function requireDesired(desired) {
-  if (!desired || typeof desired.recipeId !== 'string' || typeof desired.upstreamTag !== 'string' || typeof desired.upstreamCommit !== 'string') {
-    throw new TypeError('Desired recipeId, upstreamTag, and upstreamCommit are required');
-  }
+  return createRecipe(recipe);
 }
 
 function throwIfUnsafe(artifact) {
-  if (artifact?.kind === 'Error' || artifact?.kind === 'Conflict') {
-    throw new Error(artifact.message ?? `Unsafe artifact state: ${artifact.kind}`);
+  if (!artifact || !['Missing', 'Valid'].includes(artifact.kind)) {
+    throw new Error(artifact?.message ?? `Unsafe artifact state: ${artifact?.kind ?? 'absent'}`);
   }
 }
 
@@ -34,16 +29,34 @@ function hasUpstreamIdentity(artifact, desired) {
     && artifact.validatedLabels[UPSTREAM_REVISION_LABEL] === desired.upstreamCommit;
 }
 
+function validTagSource(source, desired) {
+  if (source?.kind === 'BuildOutput') {
+    return true;
+  }
+  if (source?.kind !== 'Valid'
+    || source.recipeId !== desired.recipeId
+    || source.validatedLabels?.[RECIPE_ID_LABEL] !== desired.recipeId
+    || !hasUpstreamIdentity(source, desired)) {
+    return false;
+  }
+  try {
+    parseSourceReference(source.sourceRef);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Find an already validated source that represents exactly the desired build.
  * Missing entries are ignored; Errors and Conflicts intentionally stop planning.
  *
  * @param {object[]} artifacts
- * @param {{recipeId: string, upstreamTag: string, upstreamCommit: string}} desired
+ * @param {object} recipe
  * @returns {object | undefined}
  */
-export function findMatchingSource(artifacts, desired) {
-  requireDesired(desired);
+export function findMatchingSource(artifacts, recipe) {
+  const desired = requireRecipe(recipe);
   if (!Array.isArray(artifacts)) {
     throw new TypeError('Artifacts must be an array');
   }
@@ -62,12 +75,12 @@ export function findMatchingSource(artifacts, desired) {
 /**
  * Choose an existing source or require a build for exactly both target platforms.
  *
- * @param {{sources: object[], desired: object, platforms: string[]}} input
+ * @param {{sources: object[], recipe: object}} input
  * @returns {object}
  */
-export function ensureArtifact({ sources, desired, platforms } = {}) {
-  requirePlatforms(platforms);
-  const existing = findMatchingSource(sources, desired);
+export function ensureArtifact({ sources, recipe } = {}) {
+  const desired = requireRecipe(recipe);
+  const existing = findMatchingSource(sources, recipe);
   return existing
     ? { kind: 'Reuse', source: existing.sourceRef, artifact: existing }
     : { kind: 'Build', recipe: desired, platforms: [...TARGET_PLATFORMS] };
@@ -78,17 +91,22 @@ export function ensureArtifact({ sources, desired, platforms } = {}) {
  * Version tags remain immutable after an existing matching upstream artifact;
  * mutable tags are reconciled to the desired artifact content.
  *
- * @param {{existing: object, desiredArtifact?: object, desired: object, destination: string, immutable?: boolean}} input
+ * @param {{existing: object, source?: object, recipe: object, destination: string, immutable?: boolean}} input
  * @returns {object}
  */
-export function ensureTag({ existing, desiredArtifact, desired, destination, immutable = false } = {}) {
-  requireDesired(desired);
-  if (typeof destination !== 'string' || destination.length === 0) {
+export function ensureTag({ existing, source, recipe, destination, immutable = false } = {}) {
+  const desired = requireRecipe(recipe);
+  try {
+    parseDestinationReference(destination);
+  } catch {
     throw new TypeError('Tag destination is required');
   }
   throwIfUnsafe(existing);
-  if (existing?.kind === 'Missing' || existing === undefined) {
-    return { kind: 'SetTag', destination };
+  if (existing?.kind === 'Missing') {
+    if (!validTagSource(source, desired)) {
+      throw new Error('SetTag requires a valid artifact or BuildOutput source');
+    }
+    return { kind: 'SetTag', destination, source };
   }
   if (existing?.kind !== 'Valid') {
     throw new Error('Unsafe artifact state');
@@ -99,47 +117,48 @@ export function ensureTag({ existing, desiredArtifact, desired, destination, imm
     }
     return { kind: 'Keep', destination };
   }
-  return compareArtifacts(existing, desiredArtifact)
-    ? { kind: 'Keep', destination }
-    : { kind: 'SetTag', destination };
+  if (compareArtifacts(existing, source)) {
+    return { kind: 'Keep', destination };
+  }
+  if (!validTagSource(source, desired)) {
+    throw new Error('SetTag requires a valid artifact or BuildOutput source');
+  }
+  return { kind: 'SetTag', destination, source };
 }
 
 /**
  * Plan source reuse/build plus immutable version and mutable latest tag actions.
  * The caller executes Build before any SetTag actions when a build is required.
  *
- * @param {{desired: object, platforms: string[], sourceArtifacts: object[], versionArtifact: object, latestArtifact: object, versionTag: string, latestTag: string}} input
+ * @param {{recipe: object, sourceArtifacts: object[], versionArtifact: object, latestArtifact: object, versionTag: string, latestTag: string}} input
  * @returns {{artifact: object, version: object, latest: object}}
  */
 export function planRun({
-  desired,
-  platforms,
+  recipe,
   sourceArtifacts = [],
   versionArtifact,
   latestArtifact,
   versionTag,
   latestTag,
 } = {}) {
-  requirePlatforms(platforms);
   const artifact = ensureArtifact({
     sources: [...sourceArtifacts, versionArtifact, latestArtifact].filter(Boolean),
-    desired,
-    platforms,
+    recipe,
   });
-  const desiredArtifact = artifact.kind === 'Reuse' ? artifact.artifact : undefined;
+  const source = artifact.kind === 'Reuse' ? artifact.artifact : { kind: 'BuildOutput' };
   return {
     artifact,
     version: ensureTag({
       existing: versionArtifact,
-      desiredArtifact,
-      desired,
+      source,
+      recipe,
       destination: versionTag,
       immutable: true,
     }),
     latest: ensureTag({
       existing: latestArtifact,
-      desiredArtifact,
-      desired,
+      source,
+      recipe,
       destination: latestTag,
     }),
   };
