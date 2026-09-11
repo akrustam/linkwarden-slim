@@ -92,7 +92,7 @@ test('resolves tag references to immutable indexes and amd64 service children', 
   assert.equal(input.postgresImage, `docker.io/library/postgres@${amd64Digest}`);
   assert.equal(input.meiliImage, `docker.io/getmeili/meilisearch@${amd64Digest}`);
   assert.equal(input.validationFingerprint, 'sha256:81e276a92b70fc28855d8999b6e512daae4dde49e07c8ed65ea2b8c164e9a903');
-  assert.equal(input.packagingExport, current.packagingExport);
+  assert.equal(Object.hasOwn(input, 'packagingExport'), false);
   assert.equal(input.upstreamUrl, 'https://github.com/example/linkwarden.git');
   assert.equal(input.upstreamSha, hex('e', 40));
   assert.match(input.recipe.packagingInputsDigest, /^sha256:[a-f0-9]{64}$/);

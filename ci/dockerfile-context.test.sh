@@ -20,6 +20,19 @@ if grep -Fq 'COPY apps/extension/package.json ./apps/extension/' "$dockerfile"; 
   fail 'Dockerfile still requires the removed apps/extension workspace'
 fi
 
+for path in \
+  "$script_dir/materialize-packaging.sh" \
+  "$script_dir/materialize-packaging.sh.test.sh" \
+  "$script_dir/prepare-context.sh" \
+  "$script_dir/prepare-context.sh.test.sh"; do
+  [ -f "$path" ] || fail "missing context helper or test: $path"
+done
+
+if [ "${CI_RUN_NETWORK_TESTS:-0}" != '1' ]; then
+  printf '%s\n' 'skipping networked dockerfile context build; set CI_RUN_NETWORK_TESTS=1 to run it'
+  exit 0
+fi
+
 packaging_seed="$tmp/packaging-seed"
 packaging_remote="$tmp/packaging.git"
 git clone -q "$repo_root" "$packaging_seed"

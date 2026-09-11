@@ -14,12 +14,12 @@ import { digestPackagingInputs, validationFingerprintFor } from './resolve-input
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
-export function buildDockerCommand({ input, context, target, tag, packagingExport = input.packagingExport }) {
+export function buildDockerCommand({ input, context, target, tag, packagingExport }) {
   const args = buildArgPairs(buildArgsForRecipe({ recipe: input.recipe, nodeImage: input.nodeImage, rustImage: input.rustImage }));
   return ['docker', 'build', '--platform', 'linux/amd64', '--load', '--file', join(packagingExport, 'Dockerfile'), '--target', target, '--tag', tag, ...args, context];
 }
 
-export function buildxStagingCommand({ input, context, staging, metadataFile, packagingExport = input.packagingExport }) {
+export function buildxStagingCommand({ input, context, staging, metadataFile, packagingExport }) {
   const args = buildArgPairs(buildArgsForRecipe({ recipe: input.recipe, nodeImage: input.nodeImage, rustImage: input.rustImage }));
   return ['docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--push', '--file', join(packagingExport, 'Dockerfile'), '--provenance=false', '--sbom=false', '--metadata-file', metadataFile, '--tag', staging, ...args, context];
 }
@@ -39,6 +39,7 @@ async function mustRun(command, args, options, run) {
 
 function validateInputShape(input) {
   if (!input || typeof input !== 'object') throw new TypeError('Invalid publish input');
+  if (Object.hasOwn(input, 'packagingExport')) throw new TypeError('Invalid publish input');
   input.recipe = createRecipe(input.recipe);
   for (const key of ['nodeImage', 'rustImage', 'postgresImage', 'meiliImage']) parseSourceReference(input[key]);
   if (typeof input.packagingUrl !== 'string' || input.packagingUrl.length === 0
@@ -358,18 +359,11 @@ export async function publishFromOptions(input, args, {
 
 async function main() {
   const [subcommand, inputPath, ...args] = process.argv.slice(2);
-  if (!['validate', 'verify-dockerfile', 'publish'].includes(subcommand) || !inputPath) {
-    throw new Error('Usage: publish.mjs validate|verify-dockerfile|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH --fresh-args JSON) [--result-out FILE]]');
+  if (!['validate', 'publish'].includes(subcommand) || !inputPath) {
+    throw new Error('Usage: publish.mjs validate|publish INPUT_JSON [--regctl PATH --staging REF --ghcr-candidate REF --ghcr-version REF --ghcr-latest REF --docker-candidate REF --docker-version REF --docker-latest REF (--fresh-input INPUT_JSON | --fresh-command PATH --fresh-args JSON) [--result-out FILE]]');
   }
   const input = await readInput(inputPath);
   if (subcommand === 'validate') await validate(input, { run: runCommand });
-  if (subcommand === 'verify-dockerfile') {
-    const sealed = await sealContext(input, { run: runCommand });
-    try {
-      const sourceDepsBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'source-deps', tag: 'linkwarden-ci-source-deps:latest' });
-      await mustRun(sourceDepsBuild[0], sourceDepsBuild.slice(1), {}, runCommand);
-    } finally { await rm(sealed.root, { recursive: true, force: true }); }
-  }
   if (subcommand === 'publish') {
     await publishFromOptions(input, args);
   }

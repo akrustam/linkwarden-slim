@@ -47,11 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           for test_script in ci/*.test.sh; do
-            if [ "$test_script" = ci/dockerfile-context.test.sh ]; then
-              bash -c 'docker() { return 1; }; export -f docker; bash "$1"' -- "$test_script"
-              continue
-            fi
-            bash "$test_script"
+            CI_RUN_NETWORK_TESTS=0 bash "$test_script"
           done
 
   validate-packaging:

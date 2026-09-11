@@ -93,7 +93,6 @@ export async function resolveInputs(options, { run } = {}) {
   return {
     meiliImage,
     nodeImage: node.sourceRef,
-    packagingExport: resolve(options['--packaging-export']),
     packagingUrl: options['--packaging-url'],
     postgresImage,
     recipe,

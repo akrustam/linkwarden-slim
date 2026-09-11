@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
 
 import {
@@ -32,7 +33,6 @@ const input = {
   rustImage: `docker.io/library/rust@${recipe.rustIndexDigest}`,
   postgresImage: `docker.io/library/postgres@sha256:${hex('f', 64)}`,
   meiliImage: `docker.io/getmeili/meilisearch@sha256:${hex('f', 64)}`,
-  packagingExport: '/tmp/packaging',
   packagingUrl: 'https://github.com/example/linkwarden-docker.git',
   upstreamSha: recipe.upstreamCommit,
   upstreamUrl: 'https://github.com/example/linkwarden.git',
@@ -64,7 +64,7 @@ function validArtifact(sourceRef) {
 }
 
 test('build commands use the complete recipe argument set', () => {
-  const command = buildDockerCommand({ input, context: '/tmp/context', target: 'main-app', tag: 'local/app:main' });
+  const command = buildDockerCommand({ input, context: '/tmp/context', packagingExport: '/tmp/packaging', target: 'main-app', tag: 'local/app:main' });
 
   assert.deepEqual(command.slice(0, 5), ['docker', 'build', '--platform', 'linux/amd64', '--load']);
   assert.equal(command.includes('--target'), true);
@@ -77,7 +77,7 @@ test('build commands use the complete recipe argument set', () => {
 });
 
 test('staging build is multi-platform and disables generated artifacts', () => {
-  const command = buildxStagingCommand({ input, context: '/tmp/context', staging: 'ghcr.io/example/app:staging', metadataFile: '/tmp/metadata.json' });
+  const command = buildxStagingCommand({ input, context: '/tmp/context', packagingExport: '/tmp/packaging', staging: 'ghcr.io/example/app:staging', metadataFile: '/tmp/metadata.json' });
 
   assert.deepEqual(command.slice(0, 6), ['docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--push']);
   assert.equal(command.includes('--provenance=false'), true);
@@ -86,6 +86,33 @@ test('staging build is multi-platform and disables generated artifacts', () => {
   assert.equal(command.includes('/tmp/metadata.json'), true);
   assert.equal(command.includes('--tag'), true);
   assert.equal(command.includes('ghcr.io/example/app:staging'), true);
+});
+
+test('build commands require an explicit packaging export', () => {
+  const legacyInput = { ...input, packagingExport: '/tmp/legacy-packaging' };
+
+  assert.throws(
+    () => buildDockerCommand({ input: legacyInput, context: '/tmp/context', target: 'main-app', tag: 'local/app:main' }),
+    /path|packaging/i,
+  );
+  assert.throws(
+    () => buildxStagingCommand({ input: legacyInput, context: '/tmp/context', staging: 'ghcr.io/example/app:staging', metadataFile: '/tmp/metadata.json' }),
+    /path|packaging/i,
+  );
+});
+
+test('CLI rejects the removed verify-dockerfile command', async () => {
+  const result = await new Promise((resolveResult, reject) => {
+    const child = spawn(process.execPath, [new URL('./publish.mjs', import.meta.url).pathname, 'verify-dockerfile', 'input.json'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => resolveResult({ code, stderr }));
+  });
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Usage: publish\.mjs validate\|publish/);
+  assert.doesNotMatch(result.stderr, /verify-dockerfile/);
 });
 
 test('validation builds source and runtime targets from an explicit sealed context', async () => {
@@ -119,7 +146,7 @@ test('validation builds source and runtime targets from an explicit sealed conte
   assert.deepEqual(bashCalls[1].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
 });
 
-test('readInput rejects missing and mismatched validation fingerprints', async (t) => {
+test('readInput rejects invalid persisted input fields', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'linkwarden-publish-input-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'input.json');
@@ -130,6 +157,9 @@ test('readInput rejects missing and mismatched validation fingerprints', async (
   await writeFile(path, JSON.stringify({ ...input, validationFingerprint: `sha256:${hex('0', 64)}` }));
 
   await assert.rejects(readInput(path), /validationFingerprint/i);
+  await writeFile(path, JSON.stringify({ ...input, packagingExport: '/tmp/legacy-packaging' }));
+
+  await assert.rejects(readInput(path), /Invalid publish input/);
 });
 
 function recipeWithNodeDigest(character) {
