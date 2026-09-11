@@ -59,12 +59,12 @@ case "$1" in
     ;;
   image)
     [ "$2" = 'inspect' ]
-    [ "$3" = '--format' ]
-    case "$4" in
-      '{{.Id}}') printf '%s\n' 'sha256:local-image-id' ;;
-      '{{.Architecture}}') printf '%s\n' "$FAKE_ARCHITECTURE" ;;
-      *) exit 1 ;;
-    esac
+    [ "$3" = '--platform' ]
+    [ "$4" = "$EXPECTED_PLATFORM" ]
+    [ "$5" = '--format' ]
+    [ "$6" = '{{.Id}} {{.Architecture}}' ]
+    [ "$7" = "$EXPECTED_SOURCE" ]
+    printf '%s %s\n' 'sha256:local-image-id' "$FAKE_ARCHITECTURE"
     ;;
   tag)
     [ "$2" = 'sha256:local-image-id' ]
@@ -85,8 +85,10 @@ PATH="$fake_bin:$PATH" \
 
 grep -Fqx -- "pull --platform linux/amd64 $source_ref" "$fake_log" \
   || fail 'materializer did not pull the requested immutable source for the platform'
+grep -Fqx -- "image inspect --platform linux/amd64 --format {{.Id}} {{.Architecture}} $source_ref" "$fake_log" \
+  || fail 'materializer did not inspect the requested immutable source for the platform'
 grep -Fqx -- 'tag sha256:local-image-id local:test' "$fake_log" \
-  || fail 'materializer did not tag the immutable local image id'
+  || fail 'materializer did not tag the platform-specific local image id'
 
 if PATH="$fake_bin:$PATH" \
   FAKE_DOCKER_LOG="$fake_log" \
@@ -99,9 +101,11 @@ if PATH="$fake_bin:$PATH" \
 fi
 
 if docker info >/dev/null 2>&1 && [ "${CI_RUN_NETWORK_TESTS:-}" = '1' ]; then
-  : "${CI_MATERIALIZE_TEST_SOURCE:?CI_MATERIALIZE_TEST_SOURCE is required when CI_RUN_NETWORK_TESTS=1}"
   local_tag="linkwarden-ci-materialize-test-$$"
-  "${BASH:-bash}" "$script" linux/amd64 "$CI_MATERIALIZE_TEST_SOURCE" "$local_tag"
+  network_source='docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616'
+  "${BASH:-bash}" "$script" linux/amd64 "$network_source" "$local_tag"
+  [ "$(docker image inspect --platform linux/amd64 --format '{{.Architecture}}' "$local_tag")" = amd64 ] \
+    || fail 'materializer tag did not resolve to the requested platform architecture'
   docker image rm "$local_tag" >/dev/null
 fi
 

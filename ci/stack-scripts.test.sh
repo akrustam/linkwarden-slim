@@ -66,6 +66,7 @@ if [ "$1" = compose ]; then
   case "$1" in
     port) printf '%s\n' '0.0.0.0:49152' ;;
     ps) printf '%s\n' 'container-id' ;;
+    up|down|logs) ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -82,8 +83,21 @@ if [ "$1" = image ] && [ "$2" = inspect ] && [ "$5" = example.invalid/linkwarden
   exit 0
 fi
 if [ "$1" = run ]; then
-  printf '%s\n' 'linkwarden-slim: no local Chromium' >&2
-  exit 1
+  case " $* " in
+    *' --entrypoint '*)
+      printf '%s\n' 'linkwarden-slim: no local Chromium' >&2
+      exit 1
+      ;;
+    *)
+      case "$*" in
+        'run --rm --pull never --network linkwarden-ci-'[0-9]*'_default -e DATABASE_URL=postgresql://linkwarden:ci-password@postgres:5432/linkwarden linkwarden-source-test:ci') exit 0 ;;
+        *)
+          printf 'source stack run does not disable image pulls before selecting the test image: %s\n' "$*" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
 fi
 exit 1
 EOF
@@ -125,6 +139,13 @@ PATH="$fake_bin:$PATH" \
   "${BASH:-bash}" "$smoke"
 [ "$(<"$tmp/config-request-count")" -eq 2 ] \
   || fail 'runtime smoke accepted a config response that was not explicitly HTTP 200'
+
+PATH="$fake_bin:$PATH" \
+  CI_POSTGRES_IMAGE=postgres:16-alpine \
+  CI_MEILI_IMAGE=getmeili/meilisearch:v1.12.8 \
+  CI_SOURCE_TEST_IMAGE=linkwarden-source-test:ci \
+  COMPOSE_PROJECT_NAME=linkwarden-ci-source-test \
+  "${BASH:-bash}" "$stack" source
 
 if ! docker compose version >/dev/null 2>&1; then
   printf '%s\n' 'stack script compose tests skipped: docker compose is unavailable'

@@ -53,6 +53,7 @@ trap cleanup EXIT
 
 if [ "$mode" = source ]; then
   docker run --rm \
+    --pull never \
     --network "${COMPOSE_PROJECT_NAME}_default" \
     -e DATABASE_URL='postgresql://linkwarden:ci-password@postgres:5432/linkwarden' \
     "$CI_SOURCE_TEST_IMAGE"
