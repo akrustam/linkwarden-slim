@@ -10,11 +10,6 @@ on:
         required: false
         type: string
         default: ""
-      force:
-        description: "Reconcile and publish even when version tags already exist"
-        required: false
-        type: boolean
-        default: false
   push:
     branches: [main]
     paths:
@@ -41,6 +36,9 @@ jobs:
     steps:
       - name: Checkout this repository
         uses: actions/checkout@v4
+
+      - name: Validate workflow structure
+        run: bash ci/workflow.test.sh
 
       - name: Resolve validation inputs
         id: inputs
@@ -117,6 +115,9 @@ jobs:
     steps:
       - name: Checkout this repository
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Resolve publish inputs
         env:
@@ -177,57 +178,12 @@ jobs:
             --monolith-version "${version#v}" \
             --out "$input_json"
 
-          fresh_command="$RUNNER_TEMP/resolve-fresh-input.sh"
-          cat > "$fresh_command" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          output_path=${1:?fresh input output path is required}
-          latest_tag="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)"
-          if ! [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'Latest upstream release is not a supported tag: %s\n' "$latest_tag" >&2
-            exit 1
-          fi
-          tag_refs="$(git ls-remote "$UPSTREAM_URL" "refs/tags/$latest_tag^{}" "refs/tags/$latest_tag")"
-          latest_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v peeled="refs/tags/$latest_tag^{}" '$2 == peeled { print $1; exit }')"
-          if [ -z "$latest_sha" ]; then
-            latest_sha="$(printf '%s\n' "$tag_refs" | awk -F '\t' -v tag="refs/tags/$latest_tag" '$2 == tag { print $1; exit }')"
-          fi
-          if ! [[ "$latest_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'Unable to resolve latest upstream tag to an exact SHA: %s\n' "$latest_tag" >&2
-            exit 1
-          fi
-          latest_packaging_sha="$(git ls-remote "$PACKAGING_URL" refs/heads/main | awk -F '\t' '$2 == "refs/heads/main" { print $1; exit }')"
-          if ! [[ "$latest_packaging_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            printf 'Unable to resolve the default packaging branch to an exact SHA\n' >&2
-            exit 1
-          fi
-          fresh_packaging_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/linkwarden-fresh-packaging.XXXXXX")"
-          trap 'rm -rf "$fresh_packaging_dir"' EXIT
-          bash ci/materialize-packaging.sh "$PACKAGING_URL" "$latest_packaging_sha" "$fresh_packaging_dir"
-          node ci/resolve-inputs.mjs \
-            --regctl "$REGCTL_PATH" \
-            --packaging-url "$PACKAGING_URL" \
-            --packaging-sha "$latest_packaging_sha" \
-            --packaging-export "$fresh_packaging_dir/export" \
-            --upstream-tag "$latest_tag" \
-            --upstream-url "$UPSTREAM_URL" \
-            --upstream-sha "$latest_sha" \
-            --postgres "$POSTGRES_REF" \
-            --meili "$MEILI_REF" \
-            --node "$NODE_REF" \
-            --rust "$RUST_REF" \
-            --monolith-version "${latest_tag#v}" \
-            --out "$output_path"
-          EOF
-          chmod 0755 "$fresh_command"
-
           recipe_id="$(node -e 'process.stdout.write(require(process.argv[1]).recipe.recipeId)' "$input_json")"
           owner_lc="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           {
             echo "INPUT_JSON=$input_json"
             echo "REGCTL_PATH=$regctl_path"
-            echo "FRESH_COMMAND=$fresh_command"
+            echo "FRESH_COMMAND=ci/resolve-fresh-input.sh"
             echo "SELECTED_VERSION=$version"
             echo "RECIPE_ID=$recipe_id"
             echo "GHCR_BASE=ghcr.io/$owner_lc/$IMAGE_NAME"
@@ -260,6 +216,14 @@ jobs:
         run: |
           set -euo pipefail
           docker_base="docker.io/${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
+          export FRESH_REGCTL_PATH="$REGCTL_PATH"
+          export FRESH_PACKAGING_URL="$PACKAGING_URL"
+          export FRESH_UPSTREAM_URL="$UPSTREAM_URL"
+          export FRESH_POSTGRES_REF="$POSTGRES_REF"
+          export FRESH_MEILI_REF="$MEILI_REF"
+          export FRESH_NODE_REF="$NODE_REF"
+          export FRESH_RUST_REF="$RUST_REF"
+          export FRESH_MONOLITH_VERSION="${SELECTED_VERSION#v}"
           node ci/publish.mjs publish "$INPUT_JSON" \
             --regctl "$REGCTL_PATH" \
             --staging "${GHCR_BASE}:staging-${GITHUB_RUN_ID}" \
@@ -276,22 +240,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          latest_version="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)"
-          if [ "$SELECTED_VERSION" != "$latest_version" ]; then
-            printf 'Not updating VERSION: %s is not the current upstream release %s\n' "$SELECTED_VERSION" "$latest_version"
-            exit 0
+          reconcile_version_pin() {
+            git fetch origin main || return 1
+            git checkout -B main origin/main || return 1
+
+            latest_version="$(gh api repos/linkwarden/linkwarden/releases/latest --jq .tag_name)" || return 1
+            if [ "$SELECTED_VERSION" != "$latest_version" ]; then
+              printf 'Not updating VERSION: %s is not the current upstream release %s\n' "$SELECTED_VERSION" "$latest_version"
+              return 0
+            fi
+
+            current_version="$(tr -d '[:space:]' < VERSION)" || return 1
+            if [ "$current_version" = "$SELECTED_VERSION" ]; then
+              printf 'VERSION already pins %s\n' "$SELECTED_VERSION"
+              return 0
+            fi
+
+            printf '%s\n' "$SELECTED_VERSION" > VERSION || return 1
+            git config user.name "github-actions[bot]" || return 1
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || return 1
+            git add VERSION || return 1
+            git commit -m "chore: pin VERSION to ${SELECTED_VERSION}" || return 1
+            git push origin HEAD:main
+          }
+
+          if ! reconcile_version_pin; then
+            printf 'VERSION pin push failed; reconciling once with origin/main\n' >&2
+            reconcile_version_pin
           fi
-          current_version="$(tr -d '[:space:]' < VERSION)"
-          if [ "$current_version" = "$SELECTED_VERSION" ]; then
-            printf 'VERSION already pins %s\n' "$SELECTED_VERSION"
-            exit 0
-          fi
-          printf '%s\n' "$SELECTED_VERSION" > VERSION
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add VERSION
-          git commit -m "chore: pin VERSION to ${SELECTED_VERSION}"
-          git push
 
       - name: Job summary
         env:
