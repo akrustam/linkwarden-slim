@@ -11,11 +11,6 @@ packaging_sha=$2
 destination=$3
 export_dir="$destination/export"
 
-if ! [[ "$packaging_sha" =~ ^[0-9a-f]{40}$ ]]; then
-  printf 'PACKAGING_SHA must be a full lowercase Git SHA\n' >&2
-  exit 64
-fi
-
 rm -rf "$destination"
 git init -q "$destination"
 git -C "$destination" remote add origin "$repository_url"
@@ -25,6 +20,11 @@ git -C "$destination" checkout -q --detach FETCH_HEAD
 resolved_sha=$(git -C "$destination" rev-parse HEAD)
 fetched_sha=$(git -C "$destination" rev-parse FETCH_HEAD)
 if [ "$resolved_sha" != "$fetched_sha" ]; then
+  printf 'packaging checkout does not match fetched ref\n' >&2
+  exit 1
+fi
+
+if [[ "$packaging_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$resolved_sha" != "$packaging_sha" ]; then
   printf 'packaging checkout does not match requested SHA\n' >&2
   exit 1
 fi

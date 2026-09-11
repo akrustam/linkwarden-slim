@@ -37,6 +37,11 @@ if [ "$resolved_sha" != "$fetched_sha" ]; then
   exit 1
 fi
 
+if [[ "$upstream_ref" =~ ^[0-9a-f]{40}$ ]] && [ "$resolved_sha" != "$upstream_ref" ]; then
+  printf 'upstream checkout does not match requested SHA\n' >&2
+  exit 1
+fi
+
 if [ ! -f "$destination/apps/mobile/package.json" ]; then
   printf 'missing required upstream workspace manifest: apps/mobile/package.json\n' >&2
   exit 1

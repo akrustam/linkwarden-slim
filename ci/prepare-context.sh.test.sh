@@ -31,7 +31,22 @@ git -C "$upstream_seed" tag v1.0.0
 printf 'upstream Dockerfile after tag\n' > "$upstream_seed/Dockerfile"
 git -C "$upstream_seed" add Dockerfile
 git -C "$upstream_seed" commit -qm newer
+newer_sha=$(git -C "$upstream_seed" rev-parse HEAD)
 git clone -q --bare "$upstream_seed" "$upstream_remote"
+
+fake_bin="$tmp/fake-bin"
+mkdir "$fake_bin"
+real_git=$(command -v git)
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [ "${3-}" = fetch ] && [ "${!#}" = "$REQUESTED_SHA" ]; then' \
+  '  args=("$@")' \
+  '  args[$(($# - 1))]=$FETCHED_SHA' \
+  '  exec "$REAL_GIT" "${args[@]}"' \
+  'fi' \
+  'exec "$REAL_GIT" "$@"' > "$fake_bin/git"
+chmod +x "$fake_bin/git"
 
 mkdir -p "$packaging_export/ci"
 printf 'packaging Dockerfile\n' > "$packaging_export/Dockerfile"
@@ -59,6 +74,11 @@ printf 'packaging entrypoint\n' > "$packaging_export/docker-entrypoint.sh"
 sha_dest="$tmp/sha-context"
 "${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$sha_dest"
 [ "$(git -C "$sha_dest" rev-parse HEAD)" = "$tag_sha" ] || fail 'prepare-context did not checkout the requested SHA'
+
+if PATH="$fake_bin:$PATH" REQUESTED_SHA="$tag_sha" FETCHED_SHA="$newer_sha" REAL_GIT="$real_git" \
+  "${BASH:-bash}" "$script" "$upstream_remote" "$tag_sha" "$packaging_export" "$tmp/mismatched-context"; then
+  fail 'prepare-context accepted a checkout that differs from the requested SHA'
+fi
 
 missing_export="$tmp/missing-export"
 mkdir -p "$missing_export/ci"

@@ -32,12 +32,36 @@ write_packaging_files "$seed" first
 git -C "$seed" add .
 git -C "$seed" commit -qm first
 first_sha=$(git -C "$seed" rev-parse HEAD)
+git -C "$seed" tag v1.0.0
 
 write_packaging_files "$seed" second
 git -C "$seed" add .
 git -C "$seed" commit -qm second
 second_sha=$(git -C "$seed" rev-parse HEAD)
 git clone -q --bare "$seed" "$remote"
+
+fake_bin="$tmp/fake-bin"
+mkdir "$fake_bin"
+real_git=$(command -v git)
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [ "${3-}" = fetch ] && [ "${!#}" = "$REQUESTED_SHA" ]; then' \
+  '  args=("$@")' \
+  '  args[$(($# - 1))]=$FETCHED_SHA' \
+  '  exec "$REAL_GIT" "${args[@]}"' \
+  'fi' \
+  'exec "$REAL_GIT" "$@"' > "$fake_bin/git"
+chmod +x "$fake_bin/git"
+
+if PATH="$fake_bin:$PATH" REQUESTED_SHA="$first_sha" FETCHED_SHA="$second_sha" REAL_GIT="$real_git" \
+  "${BASH:-bash}" "$script" "$remote" "$first_sha" "$tmp/mismatched-output"; then
+  fail 'materializer accepted a checkout that differs from the requested SHA'
+fi
+
+tag_out="$tmp/tag-output"
+"${BASH:-bash}" "$script" "$remote" v1.0.0 "$tag_out"
+[ "$(git -C "$tag_out" rev-parse HEAD)" = "$first_sha" ] || fail 'materializer did not resolve the requested tag commit'
 
 out="$tmp/output"
 mkdir -p "$out/export"
