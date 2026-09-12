@@ -37,10 +37,20 @@ bash -n "$smoke"
 
 browser_gate_line="$(grep -n '^check_no_local_browser_installs() {' "$smoke" | cut -d: -f1 || true)"
 browser_invariant_line="$(grep -n '^browser_check_output=' "$smoke" | cut -d: -f1 || true)"
+prisma_gate_line="$(grep -n '^check_prisma_client() {' "$smoke" | cut -d: -f1 || true)"
 [ -n "$browser_gate_line" ] || fail 'runtime smoke does not define a local browser installation gate'
 [ -n "$browser_invariant_line" ] || fail 'runtime smoke does not retain the browser-enabled startup invariant'
+[ -n "$prisma_gate_line" ] || fail 'runtime smoke does not verify the Prisma client against its target platform'
 [ "$browser_gate_line" -lt "$browser_invariant_line" ] \
   || fail 'runtime smoke checks browser startup before inspecting the image filesystem'
+[ "$prisma_gate_line" -lt "$browser_gate_line" ] \
+  || fail 'runtime smoke checks the browser before loading the Prisma client'
+if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- '--network "${COMPOSE_PROJECT_NAME}_default"'; then
+  fail 'runtime smoke Prisma check does not use the running dependency network'
+fi
+if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'new PrismaClient'; then
+  fail 'runtime smoke Prisma check does not initialize the generated client'
+fi
 if ! grep -A12 -F 'check_no_local_browser_installs() {' "$smoke" | grep -Fq -- '--entrypoint /bin/sh'; then
   fail 'runtime smoke local browser gate does not execute inside the runtime image'
 fi
@@ -100,6 +110,15 @@ if [ "$1" = image ] && [ "$2" = inspect ] && [ "$5" = example.invalid/linkwarden
 fi
 if [ "$1" = run ]; then
   case " $* " in
+    *' --entrypoint node '*)
+      case " $* " in
+        *' --platform linux/amd64 --network linkwarden-ci-smoke-test_default -e DATABASE_URL=postgresql://linkwarden:ci-password@postgres:5432/linkwarden --entrypoint node '*) exit 0 ;;
+        *)
+          printf 'runtime Prisma check did not use the requested image platform and dependency network: %s\n' "$*" >&2
+          exit 1
+          ;;
+      esac
+      ;;
     *' --entrypoint /bin/sh '*)
       case " $* " in
         *' --platform linux/amd64 '*'-ec '*"for path in /ms-playwright"*) exit 0 ;;

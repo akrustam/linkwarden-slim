@@ -27,6 +27,20 @@ dependencies_compose="$script_dir/dependencies-compose.yml"
 runtime_compose="$script_dir/runtime-compose.yml"
 compose=(docker compose -f "$dependencies_compose" -f "$runtime_compose")
 
+check_prisma_client() {
+  if ! docker run --rm --platform "$CI_PLATFORM" \
+    --network "${COMPOSE_PROJECT_NAME}_default" \
+    -e DATABASE_URL='postgresql://linkwarden:ci-password@postgres:5432/linkwarden' \
+    --entrypoint node \
+    "$CI_IMAGE_REF" \
+    -e 'const { PrismaClient } = require("@prisma/client"); const prisma = new PrismaClient(); prisma.$connect().then(() => prisma.$disconnect()).then(() => process.exit(0)).catch(async (error) => { console.error(error); await prisma.$disconnect().catch(() => {}); process.exit(1); });'; then
+    printf 'runtime image Prisma client cannot connect on %s\n' "$CI_PLATFORM" >&2
+    exit 1
+  fi
+}
+
+check_prisma_client
+
 port_mapping=$("${compose[@]}" port linkwarden 3000)
 host_port=${port_mapping##*:}
 if ! [[ "$host_port" =~ ^[0-9]+$ ]]; then

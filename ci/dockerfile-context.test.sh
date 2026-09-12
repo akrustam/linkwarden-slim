@@ -36,14 +36,19 @@ immutable_install_line=$(grep -n 'yarn install --immutable' "$dockerfile" | cut 
 [ -n "$full_source_copy_line" ] || fail 'source-deps does not copy the complete upstream source'
 [ -n "$immutable_install_line" ] || fail 'source-deps does not retain yarn install --immutable'
 [ "$full_source_copy_line" -lt "$immutable_install_line" ] || fail 'source-deps copies the complete source after immutable install'
-grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' "$dockerfile" \
-  || fail 'app-builder does not generate Prisma for the runtime OpenSSL target'
-grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' "$dockerfile" \
+source_deps_openssl_line=$(grep -n 'apt-get install -yqq --no-install-recommends openssl' "$dockerfile" | cut -d: -f1 | awk -v start="$source_deps_start" -v end="$source_deps_end" '$1 > start && $1 < end { print; exit }')
+[ -n "$source_deps_openssl_line" ] || fail 'source-deps does not install the runtime OpenSSL major before Prisma generation'
+[ "$source_deps_openssl_line" -lt "$immutable_install_line" ] || fail 'source-deps installs OpenSSL after the immutable dependency install'
+grep -Fq 'yarn prisma:generate' "$dockerfile" \
+  || fail 'app-builder does not generate Prisma from its native build platform'
+grep -Fq 'yarn workspace @linkwarden/prisma generate' "$dockerfile" \
   || fail 'app-builder does not regenerate Prisma after copying standalone dependencies'
-grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node node_modules/.prisma/client/' "$dockerfile" \
-  || fail 'app-builder does not place the runtime Prisma engine in root dependencies'
-grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node apps/web/.next/standalone/node_modules/.prisma/client/' "$dockerfile" \
-  || fail 'app-builder does not place the runtime Prisma engine in the generated client'
+if grep -Fq 'PRISMA_CLI_BINARY_TARGETS=' "$dockerfile"; then
+  fail 'Dockerfile hard-codes a Prisma CLI binary target across platforms'
+fi
+if grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-' "$dockerfile"; then
+  fail 'Dockerfile copies an architecture-specific Prisma engine by filename'
+fi
 
 for path in \
   "$script_dir/materialize-packaging.sh" \

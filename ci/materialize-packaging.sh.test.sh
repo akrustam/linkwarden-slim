@@ -99,10 +99,8 @@ for required in \
   'cargo install --locked monolith@${MONOLITH_VERSION}' \
   'FROM ${NODE_IMAGE} AS source-deps' \
   'COPY . .' \
-  'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' \
-  'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' \
-  'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node node_modules/.prisma/client/' \
-  'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node apps/web/.next/standalone/node_modules/.prisma/client/' \
+  'yarn prisma:generate' \
+  'yarn workspace @linkwarden/prisma generate' \
   'yarn install --immutable' \
   'FROM source-deps AS source-test' \
   'CMD ["/usr/local/bin/run-source-tests.sh"]' \
@@ -125,6 +123,14 @@ fi
 
 if grep -Fq 'COPY apps/' "$dockerfile" || grep -Fq 'COPY packages/' "$dockerfile"; then
   fail 'Dockerfile enumerates upstream workspace manifests'
+fi
+
+if grep -Fq 'PRISMA_CLI_BINARY_TARGETS=' "$dockerfile"; then
+  fail 'Dockerfile hard-codes a Prisma CLI binary target across platforms'
+fi
+
+if grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-' "$dockerfile"; then
+  fail 'Dockerfile copies an architecture-specific Prisma engine by filename'
 fi
 
 if grep -Fq 'node:22' "$dockerfile"; then

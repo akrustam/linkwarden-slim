@@ -13,6 +13,11 @@ ENV PRISMA_HIDE_UPDATE_MESSAGE=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /data
 RUN corepack enable
+RUN set -eux && \
+  apt-get update && \
+  apt-get install -yqq --no-install-recommends openssl && \
+  apt-get clean && \
+  rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
@@ -29,7 +34,7 @@ CMD ["/usr/local/bin/run-source-tests.sh"]
 FROM source-deps AS app-builder
 COPY . .
 RUN node patch-next-standalone.js && \
-  PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate && \
+  yarn prisma:generate && \
   yarn web:build
 
 RUN node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package.json", "utf8")); if(p.scripts) delete p.scripts.postinstall; fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' && \
@@ -40,9 +45,7 @@ RUN node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package
 RUN set -eux; \
   standalone_node_modules=apps/web/.next/standalone/node_modules; \
   if [ -d "$standalone_node_modules" ]; then cp -a "$standalone_node_modules"/. node_modules/; fi; \
-  PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate; \
-  cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node node_modules/.prisma/client/; \
-  cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node apps/web/.next/standalone/node_modules/.prisma/client/; \
+  yarn workspace @linkwarden/prisma generate; \
   find node_modules -type d -name 'swc-*' -path '*/@next/*' -prune -exec rm -rf {} +; \
   find node_modules -type f \( -name 'query_engine_bg.mysql*' -o -name 'query_engine_bg.sqlite*' -o -name 'query_engine_bg.sqlserver*' \) -delete; \
   find node_modules -type f \( -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name 'CHANGELOG' -o -name 'CHANGELOG.*' -o -name 'LICENSE.md' \) -delete; \
