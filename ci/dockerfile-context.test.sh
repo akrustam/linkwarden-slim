@@ -40,6 +40,10 @@ grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' "
   || fail 'app-builder does not generate Prisma for the runtime OpenSSL target'
 grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' "$dockerfile" \
   || fail 'app-builder does not regenerate Prisma after copying standalone dependencies'
+grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node node_modules/.prisma/client/' "$dockerfile" \
+  || fail 'app-builder does not place the runtime Prisma engine in root dependencies'
+grep -Fq 'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node apps/web/.next/standalone/node_modules/.prisma/client/' "$dockerfile" \
+  || fail 'app-builder does not place the runtime Prisma engine in the generated client'
 
 for path in \
   "$script_dir/materialize-packaging.sh" \

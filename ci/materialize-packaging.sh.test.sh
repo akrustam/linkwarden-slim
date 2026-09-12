@@ -101,6 +101,8 @@ for required in \
   'COPY . .' \
   'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' \
   'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' \
+  'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node node_modules/.prisma/client/' \
+  'cp node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node apps/web/.next/standalone/node_modules/.prisma/client/' \
   'yarn install --immutable' \
   'FROM source-deps AS source-test' \
   'CMD ["/usr/local/bin/run-source-tests.sh"]' \
