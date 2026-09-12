@@ -33,7 +33,7 @@ check_prisma_client() {
     -e DATABASE_URL='postgresql://linkwarden:ci-password@postgres:5432/linkwarden' \
     --entrypoint node \
     "$CI_IMAGE_REF" \
-    -e 'const { PrismaClient } = require("@prisma/client"); const prisma = new PrismaClient(); prisma.$connect().then(() => prisma.$disconnect()).then(() => process.exit(0)).catch(async (error) => { console.error(error); await prisma.$disconnect().catch(() => {}); process.exit(1); });'; then
+    -e 'const fs = require("fs"); const { PrismaClient } = require("@prisma/client"); const prisma = new PrismaClient(); prisma.$connect().then(async () => { const paths = require.resolve("@prisma/client").split("/"); const client = `${paths.slice(0, -2).join("/")}/.prisma/client`; const target = await require("@prisma/get-platform").getBinaryTargetForCurrentPlatform(); if (!fs.existsSync(`${client}/libquery_engine-${target}.so.node`)) throw new Error(`Missing Prisma query engine for ${target}`); await prisma.$disconnect(); }).then(() => process.exit(0)).catch(async (error) => { console.error(error); await prisma.$disconnect().catch(() => {}); process.exit(1); });'; then
     printf 'runtime image Prisma client cannot connect on %s\n' "$CI_PLATFORM" >&2
     exit 1
   fi

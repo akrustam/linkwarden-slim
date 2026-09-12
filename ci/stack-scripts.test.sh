@@ -48,6 +48,9 @@ prisma_gate_line="$(grep -n '^check_prisma_client() {' "$smoke" | cut -d: -f1 ||
 if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- '--network "${COMPOSE_PROJECT_NAME}_default"'; then
   fail 'runtime smoke Prisma check does not use the running dependency network'
 fi
+if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'libquery_engine-${target}.so.node'; then
+  fail 'runtime smoke Prisma check does not require the platform-specific query engine'
+fi
 if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'new PrismaClient'; then
   fail 'runtime smoke Prisma check does not initialize the generated client'
 fi
