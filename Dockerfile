@@ -40,6 +40,7 @@ RUN node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package
 RUN set -eux; \
   standalone_node_modules=apps/web/.next/standalone/node_modules; \
   if [ -d "$standalone_node_modules" ]; then cp -a "$standalone_node_modules"/. node_modules/; fi; \
+  PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate; \
   find node_modules -type d -name 'swc-*' -path '*/@next/*' -prune -exec rm -rf {} +; \
   find node_modules -type f \( -name 'query_engine_bg.mysql*' -o -name 'query_engine_bg.sqlite*' -o -name 'query_engine_bg.sqlserver*' \) -delete; \
   find node_modules -type f \( -name '*.md' -o -name '*.markdown' -o -name '*.map' -o -name 'CHANGELOG' -o -name 'CHANGELOG.*' -o -name 'LICENSE.md' \) -delete; \

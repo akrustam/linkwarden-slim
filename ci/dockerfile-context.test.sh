@@ -38,6 +38,8 @@ immutable_install_line=$(grep -n 'yarn install --immutable' "$dockerfile" | cut 
 [ "$full_source_copy_line" -lt "$immutable_install_line" ] || fail 'source-deps copies the complete source after immutable install'
 grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' "$dockerfile" \
   || fail 'app-builder does not generate Prisma for the runtime OpenSSL target'
+grep -Fq 'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' "$dockerfile" \
+  || fail 'app-builder does not regenerate Prisma after copying standalone dependencies'
 
 for path in \
   "$script_dir/materialize-packaging.sh" \

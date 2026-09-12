@@ -100,6 +100,7 @@ for required in \
   'FROM ${NODE_IMAGE} AS source-deps' \
   'COPY . .' \
   'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate' \
+  'PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn workspace @linkwarden/prisma generate' \
   'yarn install --immutable' \
   'FROM source-deps AS source-test' \
   'CMD ["/usr/local/bin/run-source-tests.sh"]' \
