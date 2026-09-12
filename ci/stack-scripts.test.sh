@@ -51,6 +51,9 @@ fi
 if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'libquery_engine-${target}.so.node'; then
   fail 'runtime smoke Prisma check does not require the platform-specific query engine'
 fi
+if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'paths.slice(0, -3)'; then
+  fail 'runtime smoke does not locate the Prisma client beneath node_modules'
+fi
 if ! grep -A18 -F 'check_prisma_client() {' "$smoke" | grep -Fq -- 'new PrismaClient'; then
   fail 'runtime smoke Prisma check does not initialize the generated client'
 fi
