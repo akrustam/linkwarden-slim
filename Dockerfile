@@ -29,7 +29,7 @@ CMD ["/usr/local/bin/run-source-tests.sh"]
 FROM source-deps AS app-builder
 COPY . .
 RUN node patch-next-standalone.js && \
-  yarn prisma:generate && \
+  PRISMA_CLI_BINARY_TARGETS=debian-openssl-3.0.x yarn prisma:generate && \
   yarn web:build
 
 RUN node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package.json", "utf8")); if(p.scripts) delete p.scripts.postinstall; fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' && \
