@@ -129,6 +129,12 @@ function requireSafeInspection(artifact, reference) {
   }
 }
 
+function requireLatestInspection(artifact, reference) {
+  if (!artifact || !['Missing', 'Valid', 'Conflict'].includes(artifact.kind)) {
+    throw new Error(artifact?.message ?? `Unable to inspect ${reference}`);
+  }
+}
+
 async function testArtifactRuntime(artifact, input, run) {
   await materializeDependencies(input, run);
   for (const [platform, digest] of Object.entries(artifact.platformDigests)) {
@@ -293,8 +299,8 @@ export async function publishGhcrInput(input, {
     return publishResult({ desiredArtifact, versionArtifact, latest: 'skipped-stale' });
   }
   const ghcrLatestArtifact = await inspectReference({ regctlPath, reference: ghcrLatest, allowNotFound: true, run: registryRun });
-  requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
-  if (!compareArtifacts(ghcrLatestArtifact, desiredArtifact)) {
+  requireLatestInspection(ghcrLatestArtifact, ghcrLatest);
+  if (ghcrLatestArtifact.kind !== 'Valid' || !compareArtifacts(ghcrLatestArtifact, desiredArtifact)) {
     await copyAndVerifyArtifact({ regctlPath, source: desiredArtifact.sourceRef, destination: ghcrLatest, expected: desiredArtifact, run: registryRun });
   }
   return publishResult({ desiredArtifact, versionArtifact, latest: 'published' });
@@ -406,7 +412,7 @@ export async function mirrorDockerInput(input, {
     ]);
     requireSafeInspection(ghcrCandidateArtifact, ghcrCandidate);
     requireSafeInspection(ghcrLatestArtifact, ghcrLatest);
-    requireSafeInspection(dockerLatestArtifact, dockerLatest);
+    requireLatestInspection(dockerLatestArtifact, dockerLatest);
     if (!compareArtifacts(ghcrCandidateArtifact, result.desiredArtifact)
       || !compareArtifacts(ghcrLatestArtifact, result.desiredArtifact)) {
       throw new Error('GHCR latest does not match the verified candidate artifact');
@@ -424,7 +430,7 @@ export async function mirrorDockerInput(input, {
       run: registryRun,
     });
   }
-  if (result.latest === 'published' && !compareArtifacts(dockerLatestArtifact, ghcrCandidateArtifact)) {
+  if (result.latest === 'published' && (dockerLatestArtifact.kind !== 'Valid' || !compareArtifacts(dockerLatestArtifact, ghcrCandidateArtifact))) {
     await copyAndVerifyArtifact({
       regctlPath,
       source: ghcrCandidateArtifact.sourceRef,

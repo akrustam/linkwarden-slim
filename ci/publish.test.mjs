@@ -356,6 +356,34 @@ test('authenticated GHCR and Docker publishing accepts the exact regctl not-foun
   ]);
 });
 
+test('a stale invalid GHCR latest is replaced by the verified candidate', async () => {
+  const desired = testArtifact('3', ['a', 'b']);
+  const staleLatest = testArtifact('4', ['c', 'd']);
+  delete staleLatest.labels['io.linkwarden-slim.recipe-id'];
+  const registry = registryFixture({
+    artifacts: [desired, staleLatest],
+    tags: {
+      'ghcr.io/example/app:candidate': desired,
+      'ghcr.io/example/app:latest': staleLatest,
+      'docker.io/example/app:latest': staleLatest,
+    },
+  });
+
+  const result = await publishGhcrInput(input, publishOptions({
+    registryRun: registry.registryRun,
+    run: async () => ({ exitCode: 0, signal: null }),
+  }));
+  await mirrorDockerInput(input, mirrorOptions(result, { registryRun: registry.registryRun }));
+
+  assert.equal(result.latest, 'published');
+  assert.deepEqual(registry.copies.map((args) => args[3]), [
+    'ghcr.io/example/app:v2.10.1',
+    'ghcr.io/example/app:latest',
+    'docker.io/example/app:v2.10.1',
+    'docker.io/example/app:latest',
+  ]);
+});
+
 test('reuses and tests a full-recipe GHCR candidate without rebuilding', async () => {
   const desired = testArtifact('3', ['a', 'b']);
   const registry = registryFixture({ artifacts: [desired], tags: { 'ghcr.io/example/app:candidate': desired } });
