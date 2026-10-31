@@ -4,7 +4,7 @@
 .github
 *.md
 LICENSE
-VERSION
+build-lock.json
 docker-compose*.yml
 .dockerignore
 .gitignore

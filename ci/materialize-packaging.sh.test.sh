@@ -92,9 +92,9 @@ fi
 
 dockerfile="$repo_root/Dockerfile"
 for required in \
-  'ARG NODE_IMAGE=node:lts-bookworm-slim' \
-  'ARG RUST_IMAGE=rust:1.96-bookworm' \
-  'ARG MONOLITH_VERSION=2.10.1' \
+  'ARG NODE_IMAGE' \
+  'ARG RUST_IMAGE' \
+  'ARG MONOLITH_VERSION' \
   'FROM ${RUST_IMAGE} AS monolith-builder' \
   'cargo install --locked monolith@${MONOLITH_VERSION}' \
   'FROM ${NODE_IMAGE} AS source-deps' \

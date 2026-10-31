@@ -453,6 +453,34 @@ test('normalizes Docker Hub tag sources before resolving generic platform refere
   }
 });
 
+test('resolves pinned indexes without consulting tags and verifies both platforms', async () => {
+  const sourceRef = `${repository}@${parentDigest}`;
+  const calls = [];
+  const resolved = await resolveImageReference({
+    regctlPath: 'regctl', reference: sourceRef,
+    platforms: ['linux/amd64', 'linux/arm64'],
+    run: async (_command, args) => {
+      calls.push(args);
+      return ok(JSON.stringify(index()));
+    },
+  });
+  assert.equal(resolved.sourceRef, sourceRef);
+  assert.deepEqual(resolved.platformRefs, {
+    'linux/amd64': `${repository}@${amd64Digest}`,
+    'linux/arm64': `${repository}@${arm64Digest}`,
+  });
+  assert.deepEqual(calls, [['manifest', 'get', sourceRef, '--format', 'raw-body']]);
+  await assert.rejects(resolveImageReference({
+    regctlPath: 'regctl', reference: `${repository}@${parentDigest}`,
+    platforms: ['linux/arm64'],
+    run: async () => ok(JSON.stringify(index([targetDescriptors()[0]]))),
+  }), /does not contain linux\/arm64/);
+  await assert.rejects(resolveImageReference({
+    regctlPath: 'regctl', reference: `${repository}@sha256:bad`,
+    platforms: ['linux/amd64'], run: async () => assert.fail('must reject before network'),
+  }), /Invalid source reference/);
+});
+
 test('rejects a source index missing a requested platform', async () => {
   await assert.rejects(
     resolveImageReference({

@@ -70,12 +70,12 @@ export function validationFingerprintFor({ postgresImage, meiliImage }) {
   return `sha256:${hash.digest('hex')}`;
 }
 
-export async function resolveInputs(options, { run } = {}) {
+export async function resolveInputs(options, { run, registryEnv } = {}) {
   const [postgres, meili, node, rust, packagingInputs] = await Promise.all([
-    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--postgres'], platforms: ['linux/amd64'], run }),
-    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--meili'], platforms: ['linux/amd64'], run }),
-    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--node'], platforms: ['linux/amd64', 'linux/arm64'], run }),
-    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--rust'], platforms: ['linux/amd64', 'linux/arm64'], run }),
+    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--postgres'], platforms: ['linux/amd64'], run, env: registryEnv }),
+    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--meili'], platforms: ['linux/amd64'], run, env: registryEnv }),
+    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--node'], platforms: ['linux/amd64', 'linux/arm64'], run, env: registryEnv }),
+    resolveImageReference({ regctlPath: options['--regctl'], reference: options['--rust'], platforms: ['linux/amd64', 'linux/arm64'], run, env: registryEnv }),
     digestPackagingInputs(options['--packaging-export']),
   ]);
   const recipe = createRecipe({

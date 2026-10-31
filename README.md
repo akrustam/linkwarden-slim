@@ -24,7 +24,7 @@ docker pull docker.io/<user>/linkwarden-slim:vX.Y.Z
 docker pull docker.io/<user>/linkwarden-slim:latest
 ```
 
-Pinned upstream version used for local docs / path-push rebuilds: see [`VERSION`](./VERSION) (pin only — **not** the source of truth for “already published”).
+Reviewed source, image digests and Monolith version: [`build-lock.json`](./build-lock.json). Scheduled builds use this single lock. Published registry artifacts remain the authority for what has already been released.
 
 ## Capabilities without a browser
 
@@ -72,15 +72,21 @@ docker run --rm \
 
 | Trigger | Behavior |
 |---------|----------|
-| Scheduled every 6h (`0 */6 * * *`) | Resolves and publishes the latest upstream release from the default `main` branch. |
-| Manual dispatch | Publishes the requested `vX.Y.Z`, or the current upstream release when empty. A historical release can receive any missing immutable registry copy, but cannot move `latest` when freshly resolved inputs differ. |
-| Push to `main` affecting packaging | Runs validation only. It never writes a registry tag. |
+| Scheduled every 6h (`0 */6 * * *`) | Builds the reviewed `build-lock.json` from `main`; never selects a new upstream release automatically. |
+| Manual dispatch | Publishes the requested `vX.Y.Z`, or the reviewed pins when empty. An explicitly selected release can receive a missing immutable registry copy, but cannot move `latest` unless it matches the reviewed default-branch pins. |
+| Pull request targeting `main`, or push to `main` affecting packaging or the build lock | Runs source tests and builds/smoke-tests amd64 and arm64 locally on the CI runner. It never writes a registry tag or uses publishing secrets. |
 
-The publisher seals the default-branch packaging commit and the upstream tag's exact commit SHA before building. Its application build recipe records that source identity plus the resolved Node and Rust base digests. It also resolves the Postgres and Meilisearch validation dependencies to exact amd64 child references, then fingerprints those two digest-qualified refs separately as `sha256:<64 lowercase hex>` for the fresh `latest` gate. Test-only service dependencies do not change the application recipe or image labels.
+The publisher seals the default-branch packaging commit and reads its build lock before resolving the upstream tag to its exact commit SHA. A tag matching the reviewed version must also match its locked SHA, including when explicitly selected in a manual run. Its application build recipe records that source identity plus the resolved Node and Rust base digests. It also resolves the Postgres and Meilisearch validation dependencies to exact amd64 child references, then fingerprints those two digest-qualified refs separately as `sha256:<64 lowercase hex>` for the fresh `latest` gate. Service refs have their own validation fingerprint. Any change to the packaging commit, including a service-pin change in the lock, also changes the application recipe through its packaging source SHA.
 
 ### Base images
 
-The Dockerfile tracks `node:lts-bookworm-slim` and `rust:1.96-bookworm`. The Node tag intentionally follows the current Node LTS line, so its major version can change. A newly resolved base digest does not move `latest` by itself: the candidate must pass all required gates first.
+The build lock pins Node and Rust by multi-platform index digest. The resolver passes them as explicit Docker build arguments; Dockerfile has no fallback image or Monolith version. The Node (24 LTS) and Rust pins come from successful run [40687144204](https://github.com/akrustam/linkwarden-slim/actions/runs/40687144204), which built and checked amd64 and arm64. Postgres 16 Alpine and Meilisearch v1.13.3 validation dependencies are also pinned by index digest in the same lock. The resolver checks required platform descriptors without resolving mutable tags. CI infrastructure is pinned separately in the workflow: Ubuntu 24.04, Buildx v0.38.0, and digest-qualified BuildKit v0.33.1 and QEMU images. Both validation and staging use the selected Buildx builder; QEMU installs only arm64 emulation. The hosted runner image and Docker Engine still receive updates.
+
+Lock validation rejects floating tags, missing fields, unknown fields and invalid source identities. A regression test ensures Dockerfile cannot introduce floating defaults. Corepack is supplied by the pinned Node image; the build reports Node/Corepack versions before enabling Yarn. It cannot silently move to Node 26 when the `lts` alias changes.
+
+Updates are deliberate: resolve and review new image index digests in `build-lock.json`, and run source tests plus both runtime gates. For a Linkwarden update, change its tag and exact commit together in that lock. A manual dispatch with another version can publish that immutable version for evaluation; it cannot advance `latest` until the reviewed pins match. CI never rewrites the pins automatically.
+
+Pins prevent unreviewed upgrades, not every possible failure for a year. APT repositories, Yarn/npm and Cargo downloads, Prisma engines, registries, GitHub APIs and hosted runners remain external dependencies. Keep verified release digests for rollback, and review security updates regularly; freezing inputs is not a substitute for maintenance.
 
 Base inspection is anonymous and credential-free. A registry can still require a bearer-token exchange or apply anonymous rate limits. `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are used only for publishing; GHCR publishing uses `GITHUB_TOKEN` with `packages: write`.
 
@@ -97,7 +103,7 @@ The CI fail-closed sequence is:
 
 There is no local Chromium in the image. The source and runtime gates use the same digest-pinned Postgres and Meilisearch service images. If input resolution, build, or any required test fails before promotion, no version or `latest` release tag is published.
 
-`vX.Y.Z` tags are immutable. A base- or packaging-only update never overwrites an existing version tag; it may advance the guarded mutable `latest` tag after the candidate passes the gates and fresh inputs still match. The fresh gate requires both the sealed application build recipe and the resolved Postgres/Meilisearch validation dependency refs to match. `latest` is evaluated after immutable promotion, so an older manual version does not replace a newer valid `latest` when current inputs have changed.
+`vX.Y.Z` tags are immutable. A base- or packaging-only update never overwrites an existing version tag; it may advance the guarded mutable `latest` tag after the candidate passes the gates and fresh inputs still match. The fresh gate re-reads the complete lock from current `main` and requires both the sealed application build recipe and the resolved Postgres/Meilisearch validation dependency refs to match. Fresh-check arguments carry only the packaging repository URL and the registry tool path; they cannot preserve stale base or service pins. `latest` is evaluated after immutable promotion, so an older manual version does not replace a newer valid `latest` when current inputs have changed.
 
 The exact tested artifact is the release authority. The recipe seals source and base-image identity, not a snapshot of every package repository: APT content can change between builds and is not snapshot-pinned.
 
@@ -111,7 +117,7 @@ Our `Dockerfile` is a deliberate fork of the upstream Dockerfile for the selecte
 - **Omit** `playwright install` / `/ms-playwright` and Playwright apt deps in the runtime stage.
 - **Add** `DISABLE_BROWSER=true` and `ENTRYPOINT` for `docker-entrypoint.sh`.
 
-On every `VERSION` bump: manually `diff` against upstream’s Dockerfile for that tag; update `node:` / `rust:` base pins in lockstep. No sed/patch in CI.
+On every locked upstream version change: manually `diff` against upstream’s Dockerfile for that tag; review the Node/Rust index digests and test compatibility before updating them. No sed/patch in CI.
 
 After `yarn workspaces focus --production`, the Dockerfile:
 
@@ -137,7 +143,7 @@ By default, the harness runs static context checks only. For a real verified loc
 CI_RUN_NETWORK_TESTS=1 bash ci/dockerfile-context.test.sh
 ```
 
-The harness materializes the packaging export, resolves an upstream commit SHA, prepares the required build context (including `mobile-package.json`), and builds the Dockerfile `source-deps` target when Docker is available. Release builds instead seal the packaging and upstream inputs in the publish workflow before building.
+The harness materializes current working-tree packaging files (including new files), prepares the pinned upstream build context with all workspace manifests, and builds the Dockerfile `source-deps` target using the locked base images. Opting into this test requires Docker; a missing Docker daemon is an error, never a successful build check. Release builds instead seal the packaging and upstream inputs in the publish workflow before building.
 
 ## Publishing setup (maintainers)
 

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { buildArgPairs, buildArgsForRecipe } from './lib/build-args.mjs';
-import { compareArtifacts } from './lib/artifact.mjs';
+import { TARGET_PLATFORMS, compareArtifacts } from './lib/artifact.mjs';
 import { copyReference, inspectReference, inspectSourceReference } from './lib/registry.mjs';
 import { formatSourceReference, parseDestinationReference, parseSourceReference } from './lib/reference.mjs';
 import { createRecipe } from './lib/recipe.mjs';
@@ -14,9 +14,10 @@ import { digestPackagingInputs, validationFingerprintFor } from './resolve-input
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
-export function buildDockerCommand({ input, context, target, tag, packagingExport }) {
+export function buildDockerCommand({ input, context, target, tag, packagingExport, platform = 'linux/amd64' }) {
+  if (!TARGET_PLATFORMS.includes(platform)) throw new TypeError('Unsupported build platform');
   const args = buildArgPairs(buildArgsForRecipe({ recipe: input.recipe, nodeImage: input.nodeImage, rustImage: input.rustImage }));
-  return ['docker', 'build', '--platform', 'linux/amd64', '--load', '--file', join(packagingExport, 'Dockerfile'), '--target', target, '--tag', tag, ...args, context];
+  return ['docker', 'buildx', 'build', '--platform', platform, '--load', '--file', join(packagingExport, 'Dockerfile'), '--target', target, '--tag', tag, ...args, context];
 }
 
 export function buildxStagingCommand({ input, context, staging, metadataFile, packagingExport }) {
@@ -42,6 +43,11 @@ function validateInputShape(input) {
   if (Object.hasOwn(input, 'packagingExport')) throw new TypeError('Invalid publish input');
   input.recipe = createRecipe(input.recipe);
   for (const key of ['nodeImage', 'rustImage', 'postgresImage', 'meiliImage']) parseSourceReference(input[key]);
+  if (parseSourceReference(input.nodeImage).digest !== input.recipe.nodeIndexDigest
+    || parseSourceReference(input.rustImage).digest !== input.recipe.rustIndexDigest
+    || input.upstreamSha !== input.recipe.upstreamCommit) {
+    throw new TypeError('Publish inputs do not match their sealed recipe');
+  }
   if (typeof input.packagingUrl !== 'string' || input.packagingUrl.length === 0
     || typeof input.upstreamUrl !== 'string' || input.upstreamUrl.length === 0
     || !SHA.test(input.upstreamSha ?? '')) {
@@ -83,7 +89,7 @@ async function materializeDependencies(input, run) {
   await mustRun('bash', ['ci/materialize-image.sh', 'linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest'], {}, run);
 }
 
-export async function validateSealedContext(input, sealed, { run = runCommand } = {}) {
+export async function validateSealedContext(input, sealed, { run = runCommand, runtimePlatforms = ['linux/amd64'] } = {}) {
   if (!sealed || typeof sealed.context !== 'string' || typeof sealed.packagingExport !== 'string') {
     throw new TypeError('A sealed context and packaging export are required');
   }
@@ -93,17 +99,20 @@ export async function validateSealedContext(input, sealed, { run = runCommand } 
   await mustRun('bash', ['ci/test-stack.sh', 'source'], {
     env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_SOURCE_TEST_IMAGE: 'linkwarden-ci-source-test:latest' },
   }, run);
-  const appBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'main-app', tag: 'linkwarden-ci-app:latest' });
-  await mustRun(appBuild[0], appBuild.slice(1), {}, run);
-  await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
-    env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: 'linkwarden-ci-app:latest', CI_PLATFORM: 'linux/amd64' },
-  }, run);
+  for (const platform of runtimePlatforms) {
+    const tag = `linkwarden-ci-${platform.replace('/', '-')}:latest`;
+    const appBuild = buildDockerCommand({ input, context: sealed.context, packagingExport: sealed.packagingExport, target: 'main-app', tag, platform });
+    await mustRun(appBuild[0], appBuild.slice(1), {}, run);
+    await mustRun('bash', ['ci/test-stack.sh', 'runtime'], {
+      env: { ...process.env, CI_POSTGRES_IMAGE: 'linkwarden-ci-postgres:latest', CI_MEILI_IMAGE: 'linkwarden-ci-meili:latest', CI_IMAGE_REF: tag, CI_PLATFORM: platform },
+    }, run);
+  }
 }
 
 async function validate(input, { run = runCommand, workspace, digestPackaging } = {}) {
   const sealed = await sealContext(input, { run, workspace, digestPackaging });
   try {
-    await validateSealedContext(input, sealed, { run });
+    await validateSealedContext(input, sealed, { run, runtimePlatforms: TARGET_PLATFORMS });
   } finally {
     await rm(sealed.root, { recursive: true, force: true });
   }
@@ -196,7 +205,7 @@ async function refreshInputFromCommand({ freshCommand, freshArgs, run, workspace
   const root = await mkdtemp(join(workspace ?? tmpdir(), 'linkwarden-fresh-'));
   const outputPath = join(root, 'input.json');
   try {
-    await mustRun('bash', [freshCommand, '--out', outputPath, ...freshArgs], {}, run);
+    await mustRun(process.execPath, [freshCommand, '--out', outputPath, ...freshArgs], {}, run);
     return await readInput(outputPath);
   } finally {
     await rm(root, { recursive: true, force: true });

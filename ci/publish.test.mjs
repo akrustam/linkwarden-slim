@@ -69,7 +69,7 @@ function validArtifact(sourceRef) {
 test('build commands use the complete recipe argument set', () => {
   const command = buildDockerCommand({ input, context: '/tmp/context', packagingExport: '/tmp/packaging', target: 'main-app', tag: 'local/app:main' });
 
-  assert.deepEqual(command.slice(0, 5), ['docker', 'build', '--platform', 'linux/amd64', '--load']);
+  assert.deepEqual(command.slice(0, 6), ['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load']);
   assert.equal(command.includes('--target'), true);
   assert.equal(command.includes('main-app'), true);
   assert.equal(command.includes('--file'), true);
@@ -149,6 +149,42 @@ test('validation builds source and runtime targets from an explicit sealed conte
   assert.deepEqual(bashCalls[1].args.slice(1), ['linux/amd64', input.meiliImage, 'linkwarden-ci-meili:latest']);
 });
 
+
+test('PR validation builds and smoke-tests both platforms without registry writes', async () => {
+  const calls = [];
+  const options = {
+    runtimePlatforms: ['linux/amd64', 'linux/arm64'],
+    run: async (command, args, settings) => {
+      calls.push({ command, args, settings });
+      return { exitCode: 0, signal: null };
+    },
+  };
+  const sealed = { context: '/tmp/context', packagingExport: '/tmp/packaging' };
+  await validateSealedContext(input, sealed, options);
+  const builds = calls.filter(({ command }) => command === 'docker');
+  assert.deepEqual(builds.map(({ args }) => args[args.indexOf('--platform') + 1]), ['linux/amd64', 'linux/amd64', 'linux/arm64']);
+  assert.equal(builds.every(({ args }) => args.includes('--load') && !args.includes('--push')), true);
+  const smoke = calls.filter(({ args }) => args[0] === 'ci/test-stack.sh' && args[1] === 'runtime');
+  assert.deepEqual(smoke.map(({ settings }) => settings.env.CI_PLATFORM), ['linux/amd64', 'linux/arm64']);
+  assert.equal(smoke[0].settings.env.CI_IMAGE_REF, 'linkwarden-ci-linux-amd64:latest');
+  assert.equal(smoke[1].settings.env.CI_IMAGE_REF, 'linkwarden-ci-linux-arm64:latest');
+  assert.throws(() => buildDockerCommand({ input, ...sealed, platform: 'invalid' }), /Unsupported build platform/);
+});
+
+test('arm64 build failure rejects PR validation before its runtime smoke', async () => {
+  let smokeCount = 0;
+  await assert.rejects(validateSealedContext(input, {
+    context: '/tmp/context', packagingExport: '/tmp/packaging',
+  }, {
+    runtimePlatforms: ['linux/amd64', 'linux/arm64'],
+    run: async (command, args) => {
+      if (args[0] === 'ci/test-stack.sh' && args[1] === 'runtime') smokeCount++;
+      return { exitCode: command === 'docker' && args.includes('linux/arm64') ? 1 : 0, signal: null };
+    },
+  }), /docker failed/);
+  assert.equal(smokeCount, 1);
+});
+
 test('readInput rejects invalid persisted input fields', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'linkwarden-publish-input-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -163,6 +199,14 @@ test('readInput rejects invalid persisted input fields', async (t) => {
   await writeFile(path, JSON.stringify({ ...input, packagingExport: '/tmp/legacy-packaging' }));
 
   await assert.rejects(readInput(path), /Invalid publish input/);
+  for (const overrides of [
+    { upstreamSha: hex('0', 40) },
+    { nodeImage: `docker.io/library/node@sha256:${hex('0', 64)}` },
+    { rustImage: `docker.io/library/rust@sha256:${hex('0', 64)}` },
+  ]) {
+    await writeFile(path, JSON.stringify({ ...input, ...overrides }));
+    await assert.rejects(readInput(path), /do not match their sealed recipe/);
+  }
 });
 
 function recipeWithNodeDigest(character) {
@@ -616,14 +660,14 @@ test('parses fresh GHCR options and separate Docker mirror options', () => {
     '--ghcr-latest', 'ghcr.io/example/app:latest',
   ];
 
-  assert.deepEqual(parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '["--latest-upstream"]', '--result-out', 'publish-result.json']), {
+  assert.deepEqual(parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.mjs', '--fresh-args', '["--packaging-url","packaging"]', '--result-out', 'publish-result.json']), {
     '--regctl': 'regctl',
     '--staging': 'ghcr.io/example/app:staging',
     '--ghcr-candidate': 'ghcr.io/example/app:candidate',
     '--ghcr-version': 'ghcr.io/example/app:v2.10.1',
     '--ghcr-latest': 'ghcr.io/example/app:latest',
-    '--fresh-command': 'ci/resolve-publish-input.sh',
-    '--fresh-args': ['--latest-upstream'],
+    '--fresh-command': 'ci/resolve-publish-input.mjs',
+    '--fresh-args': ['--packaging-url', 'packaging'],
     '--result-out': 'publish-result.json',
   });
   assert.deepEqual(parseMirrorDockerOptions([
@@ -658,11 +702,11 @@ test('parses fresh GHCR options and separate Docker mirror options', () => {
     /exactly one.*fresh-input.*fresh-command/i,
   );
   assert.throws(
-    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--result-out', 'result.json']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.mjs', '--result-out', 'result.json']),
     /--fresh-args/i,
   );
   assert.throws(
-    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.sh', '--fresh-args', '{}', '--result-out', 'result.json']),
+    () => parsePublishGhcrOptions([...ghcrRequired, '--fresh-command', 'ci/resolve-publish-input.mjs', '--fresh-args', '{}', '--result-out', 'result.json']),
     /--fresh-args/i,
   );
 });
@@ -679,15 +723,15 @@ test('runs the configured fresh command with its output path and configured argu
 
   await publishGhcrFromOptions(input, [
     ...required,
-    '--fresh-command', 'ci/resolve-publish-input.sh',
-    '--fresh-args', '["--latest-upstream","--packaging-main"]',
+    '--fresh-command', 'ci/resolve-publish-input.mjs',
+    '--fresh-args', '["--packaging-url","packaging","--regctl","regctl"]',
     '--result-out', '/dev/null',
   ], {
     run: async (command, args) => {
-      assert.equal(command, 'bash');
-      assert.deepEqual(args.slice(0, 2), ['ci/resolve-publish-input.sh', '--out']);
+      assert.equal(command, process.execPath);
+      assert.deepEqual(args.slice(0, 2), ['ci/resolve-publish-input.mjs', '--out']);
       assert.match(args[2], /linkwarden-fresh-.*\/input\.json$/);
-      assert.deepEqual(args.slice(3), ['--latest-upstream', '--packaging-main']);
+      assert.deepEqual(args.slice(3), ['--packaging-url', 'packaging', '--regctl', 'regctl']);
       await writeFile(args[2], JSON.stringify(input));
       return { exitCode: 0, signal: null };
     },

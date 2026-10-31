@@ -6,13 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Upstream release tag (e.g. v2.15.1). Empty = latest release."
+        description: "Upstream release tag (e.g. v2.15.1). Empty = reviewed build lock."
         required: false
         type: string
         default: ""
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     paths:
+      - build-lock.json
       - Dockerfile
       - docker-entrypoint.sh
       - patch-next-standalone.js
@@ -21,16 +24,14 @@ on:
 
 env:
   IMAGE_NAME: linkwarden-slim
-  UPSTREAM_URL: https://github.com/linkwarden/linkwarden.git
-  POSTGRES_REF: postgres:16-alpine
-  MEILI_REF: getmeili/meilisearch:v1.13.3
-  NODE_REF: node:lts-bookworm-slim
-  RUST_REF: rust:1.96-bookworm
-  MONOLITH_VERSION: 2.10.1
+  # CI infrastructure pins are independent of the application build lock.
+  BUILDX_VERSION: v0.38.0
+  BUILDKIT_IMAGE: docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  QEMU_IMAGE: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
 jobs:
   test-ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -51,9 +52,9 @@ jobs:
           done
 
   validate-packaging:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     needs: test-ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -67,7 +68,6 @@ jobs:
         id: inputs
         run: |
           set -euo pipefail
-          version="$(tr -d '[:space:]' < VERSION)"
           packaging_url="https://github.com/${GITHUB_REPOSITORY}.git"
           regctl_path="$RUNNER_TEMP/regctl"
           bash ci/download-regctl.sh "$regctl_path"
@@ -76,35 +76,34 @@ jobs:
           export DOCKER_CONFIG="$docker_config"
           REGCTL_PATH="$regctl_path" bash ci/registry-probe.sh
           input_json="$RUNNER_TEMP/linkwarden-validation-input.json"
-          bash ci/resolve-publish-input.sh \
+          node ci/resolve-publish-input.mjs \
             --out "$input_json" \
             --regctl "$regctl_path" \
             --packaging-url "$packaging_url" \
-            --packaging-sha "$GITHUB_SHA" \
-            --upstream-tag "$version" \
-            --upstream-url "$UPSTREAM_URL" \
-            --postgres "$POSTGRES_REF" \
-            --meili "$MEILI_REF" \
-            --node "$NODE_REF" \
-            --rust "$RUST_REF" \
-            --monolith-version "$MONOLITH_VERSION"
+            --packaging-sha "$GITHUB_SHA"
           echo "input_json=$input_json" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Validate packaging and source
         run: node ci/publish.mjs validate "${{ steps.inputs.outputs.input_json }}"
 
   publish:
-    if: github.event_name != 'push'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: test-ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
       packages: write
     concurrency:
       group: linkwarden-slim-publisher
@@ -118,7 +117,6 @@ jobs:
 
       - name: Resolve publish inputs
         env:
-          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -130,50 +128,43 @@ jobs:
           export DOCKER_CONFIG="$docker_config"
           REGCTL_PATH="$regctl_path" bash ci/registry-probe.sh
           input_json="$RUNNER_TEMP/linkwarden-publish-input.json"
-          resolver_args=(--latest-upstream --packaging-main)
+          resolver_args=()
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
-            resolver_args=(--upstream-tag "$INPUT_VERSION" --packaging-main)
+            resolver_args=(--upstream-tag "$INPUT_VERSION")
           fi
-          bash ci/resolve-publish-input.sh \
+          node ci/resolve-publish-input.mjs \
             --out "$input_json" \
             --regctl "$regctl_path" \
             --packaging-url "$packaging_url" \
-            --upstream-url "$UPSTREAM_URL" \
-            --postgres "$POSTGRES_REF" \
-            --meili "$MEILI_REF" \
-            --node "$NODE_REF" \
-            --rust "$RUST_REF" \
-            --monolith-version "$MONOLITH_VERSION" \
             "${resolver_args[@]}"
 
           recipe_id="$(node -e 'process.stdout.write(require(process.argv[1]).recipe.recipeId)' "$input_json")"
           version="$(node -e 'process.stdout.write(require(process.argv[1]).upstreamTag)' "$input_json")"
           owner_lc="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          FRESH_ARGS="$(bash ci/resolve-publish-input.sh --print-fresh-args \
+          FRESH_ARGS="$(node ci/resolve-publish-input.mjs --print-fresh-args \
             --regctl "$regctl_path" \
-            --packaging-url "$packaging_url" \
-            --upstream-url "$UPSTREAM_URL" \
-            --postgres "$POSTGRES_REF" \
-            --meili "$MEILI_REF" \
-            --node "$NODE_REF" \
-            --rust "$RUST_REF" \
-            --monolith-version "$MONOLITH_VERSION")"
+            --packaging-url "$packaging_url")"
           {
             echo "INPUT_JSON=$input_json"
             echo "REGCTL_PATH=$regctl_path"
-            echo "FRESH_COMMAND=ci/resolve-publish-input.sh"
+            echo "FRESH_COMMAND=ci/resolve-publish-input.mjs"
             echo "FRESH_ARGS=$FRESH_ARGS"
             echo "SELECTED_VERSION=$version"
             echo "RECIPE_ID=$recipe_id"
             echo "GHCR_BASE=ghcr.io/$owner_lc/$IMAGE_NAME"
-            echo "PACKAGING_URL=$packaging_url"
           } >> "$GITHUB_ENV"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
@@ -183,8 +174,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate, stage, and publish GHCR
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           node ci/publish.mjs publish-ghcr "$INPUT_JSON" \
@@ -224,8 +213,3 @@ jobs:
             --version "$SELECTED_VERSION" \
             --summary "$GITHUB_STEP_SUMMARY" \
             --env "$GITHUB_ENV"
-
-      - name: Update VERSION pin for the current release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash ci/pin-version.sh
