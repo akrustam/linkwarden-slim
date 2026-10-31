@@ -4,7 +4,11 @@ ARG MONOLITH_VERSION
 
 FROM ${RUST_IMAGE} AS monolith-builder
 ARG MONOLITH_VERSION
-RUN set -eux && cargo install --locked monolith@${MONOLITH_VERSION}
+# crates.io yanked 2.10.1; this is the immutable upstream v2.10.1 tag commit.
+RUN set -eux && \
+  cargo install --locked --git https://github.com/Y2Z/monolith.git \
+    --rev 47affd5f9070eb01a94045ce31923e577f9a9162 monolith && \
+  monolith --version | grep -F "${MONOLITH_VERSION}"
 
 FROM ${NODE_IMAGE} AS source-deps
 ENV YARN_HTTP_TIMEOUT=10000000
