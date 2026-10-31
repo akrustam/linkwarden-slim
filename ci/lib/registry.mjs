@@ -141,22 +141,25 @@ function requireRegistryResult(invocation, description) {
   return invocation.result.stdout;
 }
 
-/** Resolve one mutable image tag into its immutable index and requested platform manifests. */
+/** Resolve a tag or pinned index into immutable requested platform references. */
 export async function resolveImageReference({ regctlPath, reference, platforms, env, run = defaultRun } = {}) {
   if (typeof regctlPath !== 'string' || regctlPath.length === 0 || !Array.isArray(platforms) || platforms.length === 0) {
     throw new TypeError('regctlPath, reference, and platforms are required');
   }
-  const normalizedReference = normalizeTagReference(reference);
   let parsed;
-  try {
+  let parentDigest;
+  if (typeof reference === 'string' && reference.includes('@')) {
+    // Pinned inputs must never be resolved through a mutable tag again.
+    parsed = parseSourceReference(reference);
+    parentDigest = parsed.digest;
+  } else {
+    const normalizedReference = normalizeTagReference(reference);
     parsed = parseDestinationReference(normalizedReference);
-  } catch {
-    throw new TypeError(`Invalid image tag reference: ${reference}`);
-  }
-  const head = await invoke(run, regctlPath, ['manifest', 'head', normalizedReference, '--require-digest'], env);
-  const parentDigest = parentDigestFromHead(requireRegistryResult(head, `resolve ${normalizedReference}`));
-  if (!parentDigest || !DIGEST.test(parentDigest)) {
-    throw new TypeError(`Malformed manifest head response for ${normalizedReference}`);
+    const head = await invoke(run, regctlPath, ['manifest', 'head', normalizedReference, '--require-digest'], env);
+    parentDigest = parentDigestFromHead(requireRegistryResult(head, `resolve ${normalizedReference}`));
+    if (!parentDigest || !DIGEST.test(parentDigest)) {
+      throw new TypeError(`Malformed manifest head response for ${normalizedReference}`);
+    }
   }
   const sourceRef = formatSourceReference(parsed.repository, parentDigest);
   const manifest = await invoke(run, regctlPath, ['manifest', 'get', sourceRef, '--format', 'raw-body'], env);

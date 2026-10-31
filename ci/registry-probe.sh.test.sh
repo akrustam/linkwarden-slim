@@ -21,14 +21,6 @@ if [ "\$1" = manifest ] && [ "\$2" = head ] && [[ "\$3" == *linkwarden-slim-prob
   printf '%s\\n' "\${ABSENT_MANIFEST_OUTPUT:?}" >&2
   exit 1
 fi
-if [ "\$1" = manifest ] && [ "\$2" = head ] && [ "\$3" = 'docker.io/library/node:lts-bookworm-slim' ]; then
-  printf '%s\\n' '$digest'
-  exit 0
-fi
-if [ "\$1" = manifest ] && [ "\$2" = get ]; then
-  printf '%s\\n' '{"schemaVersion":2,"manifests":[{"digest":"$child","platform":{"os":"linux","architecture":"amd64"}},{"digest":"$digest","platform":{"os":"linux","architecture":"arm64"}}]}'
-  exit 0
-fi
 printf 'invalid reference\n' >&2
 exit 1
 EOF

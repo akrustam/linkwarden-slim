@@ -12,10 +12,10 @@ fail() {
 }
 
 dockerfile="$repo_root/Dockerfile"
-grep -Fq 'ARG NODE_IMAGE=node:lts-bookworm-slim' "$dockerfile" \
-  || fail 'Dockerfile is missing the local Node image default'
-grep -Fq 'ARG RUST_IMAGE=rust:1.96-bookworm' "$dockerfile" \
-  || fail 'Dockerfile is missing the local Rust image default'
+grep -Fq 'ARG NODE_IMAGE' "$dockerfile" \
+  || fail 'Dockerfile is missing the sealed Node image argument'
+grep -Fq 'ARG RUST_IMAGE' "$dockerfile" \
+  || fail 'Dockerfile is missing the sealed Rust image argument'
 if grep -Fq 'COPY apps/extension/package.json ./apps/extension/' "$dockerfile"; then
   fail 'Dockerfile still requires the removed apps/extension workspace'
 fi
@@ -63,17 +63,19 @@ if [ "${CI_RUN_NETWORK_TESTS:-0}" != '1' ]; then
   exit 0
 fi
 
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  fail 'Docker is required when CI_RUN_NETWORK_TESTS=1'
+fi
+
 packaging_seed="$tmp/packaging-seed"
 packaging_remote="$tmp/packaging.git"
-git clone -q "$repo_root" "$packaging_seed"
-# Include uncommitted packaging changes so this local remote exactly represents
-# the branch content the harness is validating before its focused commit.
-if ! git -C "$repo_root" diff --quiet -- Dockerfile docker-entrypoint.sh patch-next-standalone.js ci/run-source-tests.sh; then
-  git -C "$repo_root" diff --binary -- Dockerfile docker-entrypoint.sh patch-next-standalone.js ci/run-source-tests.sh \
-    | git -C "$packaging_seed" apply
-  git -C "$packaging_seed" add Dockerfile docker-entrypoint.sh patch-next-standalone.js ci/run-source-tests.sh
-  git -C "$packaging_seed" -c user.name=test -c user.email=test@example.invalid commit -qm 'test packaging snapshot'
-fi
+mkdir -p "$packaging_seed/ci"
+for path in Dockerfile docker-entrypoint.sh patch-next-standalone.js ci/run-source-tests.sh build-lock.json; do
+  cp "$repo_root/$path" "$packaging_seed/$path"
+done
+git init -q "$packaging_seed"
+git -C "$packaging_seed" add .
+git -C "$packaging_seed" -c user.name=test -c user.email=test@example.invalid commit -qm 'test packaging snapshot'
 git clone -q --bare "$packaging_seed" "$packaging_remote"
 packaging_sha=$(git --git-dir="$packaging_remote" rev-parse HEAD)
 packaging_export="$tmp/packaging-export"
@@ -85,16 +87,16 @@ packaging_export="$tmp/packaging-export"
   || fail 'materializer did not export the source-test launcher'
 
 upstream_remote="$tmp/upstream.git"
-upstream_sha=$(git ls-remote https://github.com/linkwarden/linkwarden.git refs/tags/v2.16.3 | cut -f1)
-[ -n "$upstream_sha" ] || fail 'could not resolve upstream v2.16.3'
+upstream_sha=$(node -p 'require(process.argv[1]).upstream.commit' "$repo_root/build-lock.json")
+upstream_url=$(node -p 'require(process.argv[1]).upstream.url' "$repo_root/build-lock.json")
+[ -n "$upstream_sha" ] || fail 'missing locked upstream commit'
 git init -q --bare "$upstream_remote"
-git --git-dir="$upstream_remote" fetch -q --no-tags https://github.com/linkwarden/linkwarden.git "$upstream_sha"
+git --git-dir="$upstream_remote" fetch -q --no-tags "$upstream_url" "$upstream_sha"
 
 context="$tmp/context"
 "${BASH:-bash}" "$script_dir/prepare-context.sh" "file://$upstream_remote" "$upstream_sha" "$packaging_export/export" "$context"
 
-[ -f "$context/apps/mobile/package.json" ] || fail 'upstream v2.16.3 is missing apps/mobile/package.json'
-[ -f "$context/apps/extension/package.json" ] || fail 'upstream v2.16.3 is missing apps/extension/package.json'
+[ -f "$context/package.json" ] || fail 'locked upstream is missing package.json'
 [ ! -e "$context/mobile-package.json" ] || fail 'prepare-context still stages a mobile workspace manifest workaround'
 [ -f "$context/run-source-tests.sh" ] || fail 'prepare-context did not place the source-test launcher at the build-context root'
 [ -f "$packaging_export/export/Dockerfile" ] \
@@ -102,32 +104,14 @@ context="$tmp/context"
 grep -Fq 'CMD ["/usr/local/bin/run-source-tests.sh"]' "$packaging_export/export/Dockerfile" \
   || fail 'source-test target does not run the root source-test launcher'
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  printf '%s\n' 'docker unavailable; static context validation passed'
-  exit 0
-fi
+node_image=$(node -p 'require(process.argv[1]).images.node' "$repo_root/build-lock.json")
+rust_image=$(node -p 'require(process.argv[1]).images.rust' "$repo_root/build-lock.json")
 
-node_image=$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' node:lts-bookworm-slim)
-rust_image=$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' rust:1.96-bookworm)
-
-case "$node_image" in
-  '"sha256:'[a-f0-9][a-f0-9]*) ;;
-  *) fail 'could not resolve an immutable Node image digest' ;;
-esac
-case "$rust_image" in
-  '"sha256:'[a-f0-9][a-f0-9]*) ;;
-  *) fail 'could not resolve an immutable Rust image digest' ;;
-esac
-node_image=${node_image#\"}
-node_image=${node_image%\"}
-rust_image=${rust_image#\"}
-rust_image=${rust_image%\"}
-
-docker build \
+docker buildx build --load \
   --target source-deps \
   -f "$packaging_export/export/Dockerfile" \
-  --build-arg "NODE_IMAGE=node:lts-bookworm-slim@$node_image" \
-  --build-arg "RUST_IMAGE=rust:1.96-bookworm@$rust_image" \
+  --build-arg "NODE_IMAGE=$node_image" \
+  --build-arg "RUST_IMAGE=$rust_image" \
   "$context"
 
 printf '%s\n' 'dockerfile context tests passed'

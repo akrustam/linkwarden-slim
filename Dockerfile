@@ -1,10 +1,14 @@
-ARG NODE_IMAGE=node:lts-bookworm-slim
-ARG RUST_IMAGE=rust:1.96-bookworm
-ARG MONOLITH_VERSION=2.10.1
+ARG NODE_IMAGE
+ARG RUST_IMAGE
+ARG MONOLITH_VERSION
 
 FROM ${RUST_IMAGE} AS monolith-builder
 ARG MONOLITH_VERSION
-RUN set -eux && cargo install --locked monolith@${MONOLITH_VERSION}
+# crates.io yanked 2.10.1; this is the immutable upstream v2.10.1 tag commit.
+RUN set -eux && \
+  cargo install --locked --git https://github.com/Y2Z/monolith.git \
+    --rev 47affd5f9070eb01a94045ce31923e577f9a9162 monolith && \
+  monolith --version | grep -F "${MONOLITH_VERSION}"
 
 FROM ${NODE_IMAGE} AS source-deps
 ENV YARN_HTTP_TIMEOUT=10000000
@@ -12,7 +16,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ENV PRISMA_HIDE_UPDATE_MESSAGE=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /data
-RUN corepack enable
+RUN node --version && corepack --version && corepack enable
 RUN set -eux && \
   apt-get update && \
   apt-get install -yqq --no-install-recommends openssl && \
@@ -59,7 +63,7 @@ ARG PACKAGING_INPUTS_DIGEST
 ARG PACKAGING_SOURCE_SHA
 ARG NODE_BASE_DIGEST
 ARG RUST_BASE_DIGEST
-ARG MONOLITH_VERSION=2.10.1
+ARG MONOLITH_VERSION
 ARG DEBIAN_FRONTEND=noninteractive
 LABEL org.opencontainers.image.version=$UPSTREAM_TAG \
   org.opencontainers.image.revision=$PACKAGING_INPUTS_DIGEST \

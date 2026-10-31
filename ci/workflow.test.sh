@@ -45,12 +45,14 @@ require 'test-ci:'
 require 'validate-packaging:'
 require 'publish:'
 require_count 'needs: test-ci' 2
-require 'if: github.event_name == '\''push'\'''
-require 'if: github.event_name != '\''push'\'''
+require "if: github.event_name == 'push' || github.event_name == 'pull_request'"
+require "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+require 'pull_request:'
+forbid 'pull_request_target:'
 require 'group: linkwarden-slim-publisher'
 require 'cancel-in-progress: false'
 require 'contents: read'
-require 'contents: write'
+forbid 'contents: write'
 require 'packages: write'
 require 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
 require 'docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130'
@@ -58,28 +60,38 @@ require 'docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f'
 require 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9'
 require 'ci/download-regctl.sh'
 require 'ci/registry-probe.sh'
-require_count 'bash ci/resolve-publish-input.sh' 3
+require_count 'node ci/resolve-publish-input.mjs' 3
 require 'ci/publish.mjs validate'
 require 'ci/publish.mjs publish-ghcr'
 require 'ci/publish.mjs mirror-docker'
 require 'ci/summarize-publish.mjs'
-require 'ci/pin-version.sh'
+forbid 'run: bash ci/pin-version.sh'
 require '--result-out "$RUNNER_TEMP/ghcr-publish-result.json"'
 require '--result-out "$result_path"'
 require '--fresh-command'
 require '--fresh-args'
-require 'FRESH_COMMAND=ci/resolve-publish-input.sh'
+require 'FRESH_COMMAND=ci/resolve-publish-input.mjs'
 require 'FRESH_ARGS="$('
 require '--print-fresh-args'
 require 'echo "FRESH_ARGS=$FRESH_ARGS"'
-require 'MONOLITH_VERSION: 2.10.1'
-require_count '--monolith-version "$MONOLITH_VERSION"' 3
 require 'GITHUB_SHA'
 require 'GITHUB_RUN_ID'
 require 'candidate-${RECIPE_ID}'
 require 'staging-${GITHUB_RUN_ID}'
 require 'tr '\''[:upper:]'\'' '\''[:lower:]'\'''
-require 'getmeili/meilisearch:v1.13.3'
+require 'ubuntu-24.04'
+require 'BUILDX_VERSION: v'
+require_count 'version: ${{ env.BUILDX_VERSION }}' 2
+require_count 'driver-opts: image=${{ env.BUILDKIT_IMAGE }}' 2
+require_count 'image: ${{ env.QEMU_IMAGE }}' 2
+require_count 'platforms: arm64' 2
+require 'resolver_args=()'
+require 'build-lock.json'
+forbid 'NODE_REF:'
+forbid 'RUST_REF:'
+forbid 'ubuntu-latest'
+forbid 'node:lts-'
+forbid 'resolver_args=(--latest-upstream'
 require 'bash ci/workflow.test.sh'
 require 'node --test ci/*.test.mjs ci/lib/*.test.mjs'
 require 'CI_RUN_NETWORK_TESTS=0 bash "$test_script"'
@@ -168,4 +180,26 @@ if ! grep -A60 '^  test-ci:$' "$workflow" | grep -Fq 'contents: read'; then
   fail "test-ci job must have read-only contents permission"
 fi
 
-printf 'workflow structural tests passed\n'
+# Parse the actual YAML and syntax-check every embedded shell script, rather
+# than relying solely on greps for expected fragments.
+ruby - "$workflow" <<'RUBY'
+require 'yaml'
+workflow = YAML.load_file(ARGV.fetch(0))
+jobs = workflow.fetch('jobs')
+%w[test-ci validate-packaging].each do |name|
+  job = jobs.fetch(name)
+  abort "#{name} must be read-only" unless job.fetch('permissions') == { 'contents' => 'read' }
+  abort "#{name} must not use publishing secrets" if job.to_s.include?('secrets.')
+  abort "#{name} must not log into a registry" if job.fetch('steps').any? { |step| step.fetch('uses', '').include?('login-action') }
+end
+abort 'publication must use an explicit event allowlist' unless jobs.fetch('publish').fetch('if') == "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+workflow.fetch('jobs').each do |name, job|
+  job.fetch('steps').each do |step|
+    next unless step['run']
+    IO.popen(['bash', '-n'], 'w') { |io| io.write(step.fetch('run')) }
+    abort "invalid shell in #{name}: #{step['name']}" unless $?.success?
+  end
+end
+RUBY
+
+printf 'workflow structure and embedded shell syntax tests passed\n'

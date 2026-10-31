@@ -92,11 +92,12 @@ fi
 
 dockerfile="$repo_root/Dockerfile"
 for required in \
-  'ARG NODE_IMAGE=node:lts-bookworm-slim' \
-  'ARG RUST_IMAGE=rust:1.96-bookworm' \
-  'ARG MONOLITH_VERSION=2.10.1' \
+  'ARG NODE_IMAGE' \
+  'ARG RUST_IMAGE' \
+  'ARG MONOLITH_VERSION' \
   'FROM ${RUST_IMAGE} AS monolith-builder' \
-  'cargo install --locked monolith@${MONOLITH_VERSION}' \
+  'cargo install --locked --git https://github.com/Y2Z/monolith.git' \
+  '--rev 47affd5f9070eb01a94045ce31923e577f9a9162 monolith' \
   'FROM ${NODE_IMAGE} AS source-deps' \
   'COPY . .' \
   'yarn prisma:generate' \
@@ -114,7 +115,7 @@ for required in \
   'io.linkwarden-slim.node-base=$NODE_BASE_DIGEST' \
   'io.linkwarden-slim.rust-base=$RUST_BASE_DIGEST' \
   'io.linkwarden-slim.monolith-version=$MONOLITH_VERSION'; do
-  grep -Fq "$required" "$dockerfile" || fail "Dockerfile is missing: $required"
+  grep -Fq -- "$required" "$dockerfile" || fail "Dockerfile is missing: $required"
 done
 
 if grep -Fq 'mobile-package.json' "$dockerfile"; then
